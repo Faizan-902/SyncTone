@@ -59,24 +59,44 @@ const REQUIRED_VOICES = [
 ];
 
 /**
- * Idempotently upserts all REQUIRED_VOICES into PostgreSQL `voices` table.
+ * Idempotently upserts all REQUIRED_VOICES into PostgreSQL `voices` table in a single query.
  */
+let voiceCatalogVerified = false;
 async function ensureVoiceCatalog(pgPool = pool) {
-  for (const v of REQUIRED_VOICES) {
-    await pgPool.query(
-      `
-      INSERT INTO voices (id, label, gender, age_band, language, reserved_narrator)
-      VALUES ($1, $2, $3, $4, $5, $6)
-      ON CONFLICT (id) DO UPDATE SET
-        label = EXCLUDED.label,
-        gender = EXCLUDED.gender,
-        age_band = EXCLUDED.age_band,
-        language = EXCLUDED.language,
-        reserved_narrator = EXCLUDED.reserved_narrator;
-    `,
-      [v.id, v.label, v.gender, v.age_band, v.language, v.reserved_narrator]
-    );
+  if (voiceCatalogVerified && pgPool === pool) return;
+
+  const ids = REQUIRED_VOICES.map((v) => v.id);
+  const checkRes = await pgPool.query(
+    'SELECT COUNT(*)::int AS cnt FROM voices WHERE id = ANY($1::varchar[])',
+    [ids]
+  );
+  if ((checkRes.rows[0]?.cnt || 0) >= REQUIRED_VOICES.length) {
+    if (pgPool === pool) voiceCatalogVerified = true;
+    return;
   }
+
+  const values = [];
+  const placeholders = REQUIRED_VOICES.map((v, i) => {
+    const base = i * 6;
+    values.push(v.id, v.label, v.gender, v.age_band, v.language, v.reserved_narrator);
+    return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6})`;
+  }).join(',\n      ');
+
+  await pgPool.query(
+    `
+    INSERT INTO voices (id, label, gender, age_band, language, reserved_narrator)
+    VALUES
+      ${placeholders}
+    ON CONFLICT (id) DO UPDATE SET
+      label = EXCLUDED.label,
+      gender = EXCLUDED.gender,
+      age_band = EXCLUDED.age_band,
+      language = EXCLUDED.language,
+      reserved_narrator = EXCLUDED.reserved_narrator;
+    `,
+    values
+  );
+  if (pgPool === pool) voiceCatalogVerified = true;
 }
 
 /**

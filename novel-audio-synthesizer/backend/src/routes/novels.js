@@ -18,6 +18,12 @@ const router = Router();
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ALLOWED_CHANNELS = ['verified', 'community'];
+const NOVELS_CACHE_TTL_MS = 10000;
+const novelsListCache = new Map();
+
+function invalidateNovelsCache() {
+  novelsListCache.clear();
+}
 
 // Stream multipart file uploads directly to temporary files on disk
 const uploadStorage = multer.diskStorage({
@@ -44,8 +50,18 @@ const upload = multer({
  */
 router.get('/novels', async (req, res) => {
   try {
-    const { channel } = req.query;
+    const { channel, fresh } = req.query;
     const channelFilter = channel && ALLOWED_CHANNELS.includes(channel) ? channel : null;
+    const cacheKey = channelFilter || '__all__';
+    const bypassCache = process.env.NODE_ENV === 'test' || fresh === '1' || fresh === 'true';
+
+    if (!bypassCache) {
+      const cached = novelsListCache.get(cacheKey);
+      if (cached && Date.now() - cached.ts < NOVELS_CACHE_TTL_MS) {
+        res.set('Cache-Control', 'public, max-age=5, stale-while-revalidate=30');
+        return res.json(cached.payload);
+      }
+    }
 
     const query = `
       SELECT
@@ -77,7 +93,10 @@ router.get('/novels', async (req, res) => {
     `;
 
     const result = await pool.query(query, [channelFilter]);
-    return res.json({ novels: result.rows });
+    const payload = { novels: result.rows };
+    novelsListCache.set(cacheKey, { ts: Date.now(), payload });
+    res.set('Cache-Control', 'public, max-age=5, stale-while-revalidate=30');
+    return res.json(payload);
   } catch (err) {
     console.error('[Novels List Error]:', err.message);
     return res.status(500).json({ error: 'Failed to retrieve novels.' });
@@ -656,6 +675,7 @@ router.post('/novels', optionalAuth, async (req, res) => {
       }
 
       await client.query('COMMIT');
+      invalidateNovelsCache();
 
       return res.status(201).json({
         message: 'Novel created successfully',
@@ -843,6 +863,7 @@ router.patch('/novels/:id', optionalAuth, async (req, res) => {
       return res.status(404).json({ error: 'Novel not found.' });
     }
 
+    invalidateNovelsCache();
     return res.json({
       message: 'Novel updated successfully',
       novel: result.rows[0],
@@ -863,5 +884,7 @@ router.delete(['/novels', '/novels/:id'], optionalAuth, async (req, res) => {
     code: 'PERMANENT_DELETION_DISABLED',
   });
 });
+
+router.invalidateNovelsCache = invalidateNovelsCache;
 
 module.exports = router;

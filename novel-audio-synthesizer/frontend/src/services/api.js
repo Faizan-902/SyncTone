@@ -161,6 +161,18 @@ export const api = {
       api.post('/auth/logout'),
     me: () =>
       api.get('/auth/me'),
+    providers: () =>
+      api.get('/auth/providers'),
+    oauthNeonSession: (token, provider = 'google') =>
+      api.post('/auth/oauth/neon-session', { token, provider }),
+    passkey: {
+      registerOptions: (payload = {}) => api.post('/auth/passkey/register-options', payload),
+      registerVerify: (payload) => api.post('/auth/passkey/register-verify', payload),
+      loginOptions: (payload = {}) => api.post('/auth/passkey/login-options', payload),
+      loginVerify: (payload) => api.post('/auth/passkey/login-verify', payload),
+      list: () => api.get('/auth/passkeys'),
+      remove: (credentialId) => api.delete(`/auth/passkeys/${encodeURIComponent(credentialId)}`),
+    },
   },
 
   // Novels Endpoints

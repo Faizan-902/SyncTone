@@ -132,3 +132,4 @@ private/
 PARTNER_*.md
 docs/*.pdf
 scripts/generate_partner_plan_pdf.py
+.neon

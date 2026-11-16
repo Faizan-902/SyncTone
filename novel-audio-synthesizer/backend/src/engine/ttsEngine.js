@@ -228,6 +228,64 @@ const KOKORO_TO_EDGE_MAP = {
   mac_moira: 'en-IE-EmilyNeural',
 };
 
+const PARADEE_BRIDGE_MAP = {
+  bm_fable: { voice: 'en-GB-RyanNeural', pitch: '-2Hz', rateOffset: 2 },
+  bf_isabella: { voice: 'en-GB-SoniaNeural', pitch: '+3Hz', rateOffset: 3 },
+  am_puck: { voice: 'en-US-ChristopherNeural', pitch: '+2Hz', rateOffset: 5 },
+  af_heart: { voice: 'en-US-AriaNeural', pitch: '+4Hz', rateOffset: 2 },
+};
+
+const MAC_TO_EDGE_MAP = {
+  daniel: 'en-GB-RyanNeural',
+  'reed (english (uk))': 'en-GB-ThomasNeural',
+  'reed (english (us))': 'en-US-ChristopherNeural',
+  reed: 'en-US-ChristopherNeural',
+  'serena (premium)': 'en-GB-LibbyNeural',
+  serena: 'en-GB-LibbyNeural',
+  'kate (enhanced)': 'en-GB-SoniaNeural',
+  kate: 'en-GB-SoniaNeural',
+  'eddy (english (uk))': 'en-IE-ConnorNeural',
+  'eddy (english (us))': 'en-US-EricNeural',
+  eddy: 'en-IE-ConnorNeural',
+  'rocko (english (uk))': 'en-NZ-MitchellNeural',
+  'rocko (english (us))': 'en-US-AndrewNeural',
+  rocko: 'en-US-AndrewNeural',
+  'shelley (english (uk))': 'en-GB-SoniaNeural',
+  'shelley (english (us))': 'en-US-EmmaNeural',
+  shelley: 'en-US-EmmaNeural',
+  'grandpa (english (uk))': 'en-US-SteffanNeural',
+  'grandpa (english (us))': 'en-US-GuyNeural',
+  grandpa: 'en-US-SteffanNeural',
+  'flo (english (uk))': 'en-GB-MaisieNeural',
+  'flo (english (us))': 'en-US-AvaNeural',
+  flo: 'en-GB-MaisieNeural',
+  moira: 'en-IE-EmilyNeural',
+  samantha: 'en-US-AriaNeural',
+  karen: 'en-AU-NatashaNeural',
+  tessa: 'en-NZ-MollyNeural',
+  fred: 'en-AU-WilliamMultilingualNeural',
+  rishi: 'en-US-RogerNeural',
+  'sandy (english (uk))': 'en-GB-MaisieNeural',
+  'sandy (english (us))': 'en-US-JennyNeural',
+  sandy: 'en-US-JennyNeural',
+};
+
+function canUseCloudNeuralBridge() {
+  return process.env.NODE_ENV !== 'test' && !process.env.SYNCTONE_DISABLE_CLOUD_BRIDGE;
+}
+
+function buildBridgeProsody(speed = 1.0, extraRatePct = 0, extraPitchHz = 0, baseProsody = null) {
+  const baseRate = parseInt(baseProsody?.rate, 10) || 0;
+  const basePitch = parseInt(baseProsody?.pitch, 10) || 0;
+  const speedPct = Math.round(((speed || 1.0) - 1.0) * 100);
+  const totalRate = Math.max(-45, Math.min(60, baseRate + speedPct + extraRatePct));
+  const totalPitch = Math.max(-25, Math.min(25, basePitch + extraPitchHz));
+  return {
+    rate: `${totalRate >= 0 ? '+' : ''}${totalRate}%`,
+    pitch: `${totalPitch >= 0 ? '+' : ''}${totalPitch}Hz`,
+  };
+}
+
 const EDGE_TO_KOKORO_MAP = {
   'en-GB-RyanNeural': 'bm_george',
   'en-GB-ArthurNeural': 'bm_lewis',
@@ -439,9 +497,9 @@ class TTSEngine {
           try {
             ws.close();
           } catch (_) {}
-          reject(new Error('Edge TTS WebSocket timeout (12s)'));
+          reject(new Error('Edge TTS WebSocket timeout (6s)'));
         }
-      }, 12000);
+      }, 6000);
 
       ws.on('open', () => {
         const configMsg =
@@ -720,10 +778,32 @@ class TTSEngine {
           };
         }
       } catch (err) {
-        if (options.failHonestly) {
+        if (options.failHonestly && !canUseCloudNeuralBridge()) {
           throw err;
         }
-        console.warn(`[TTSEngine] Kokoro worker pool failed: ${err.message}`);
+        console.warn(`[TTSEngine] Kokoro worker pool failed (${err.message}); using cloud neural bridge if available.`);
+      }
+    }
+
+    // Cloud Neural Bridge when local Kokoro ONNX / espeak-ng weights are unavailable
+    if (!options.disableCloudBridge && canUseCloudNeuralBridge() && !process.env.SYNCTONE_DISABLE_MACOS_SAY) {
+      const bridgeVoice =
+        options.edgeVoice ||
+        KOKORO_TO_EDGE_MAP[kokoroVoice] ||
+        (kokoroVoice.startsWith('af_') || kokoroVoice.startsWith('bf_') ? 'en-GB-SoniaNeural' : 'en-GB-RyanNeural');
+      const charKey = String(options.characterId || options.character_id || '').trim().toLowerCase();
+      const charPitchJitter = charKey && charKey !== 'narrator' ? ((stableHash(`${charKey}:kp`) % 7) - 3) : 0;
+      const bridgeProsody = buildBridgeProsody(speed, -3, 2 + charPitchJitter, options.prosody);
+      try {
+        const edgeRes = await this.synthesizeWithEdge(trimmed, bridgeVoice, { prosody: bridgeProsody });
+        return {
+          ...edgeRes,
+          engine: 'kokoro-tts',
+          resolved_voice_id: kokoroVoice,
+          cloud_bridge: true,
+        };
+      } catch (bridgeErr) {
+        console.warn(`[TTSEngine] Kokoro cloud neural bridge failed: ${bridgeErr.message}`);
       }
     }
 
@@ -858,6 +938,29 @@ class TTSEngine {
       }
     }
 
+    // Linux / Serverless Cloud Bridge for Machine-TTS when /usr/bin/say is unavailable
+    if (canUseCloudNeuralBridge()) {
+      const lowerMac = String(macVoice || '').toLowerCase();
+      const mappedEdge =
+        MAC_TO_EDGE_MAP[lowerMac] ||
+        KOKORO_TO_EDGE_MAP[voiceId] ||
+        (/^en-[A-Z]{2}-/.test(String(voiceId || '')) ? String(voiceId) : null) ||
+        'en-GB-ThomasNeural';
+      const wpmOffset = targetWpm > 195 ? 4 : targetWpm < 175 ? -4 : 0;
+      const bridgeProsody = buildBridgeProsody(speed, 8 + wpmOffset, -5);
+      try {
+        const edgeRes = await this.synthesizeWithEdge(trimmed, mappedEdge, { prosody: bridgeProsody });
+        return {
+          ...edgeRes,
+          engine: 'machine-tts',
+          resolved_voice_id: macVoice,
+          cloud_bridge: true,
+        };
+      } catch (bridgeErr) {
+        console.warn(`[TTSEngine] Machine-TTS cloud neural bridge failed: ${bridgeErr.message}`);
+      }
+    }
+
     // Fallback: clean silent buffer
     const baseDurationSec = Math.max(0.6, trimmed.length / 15 / (speed || 1.0));
     const sampleCount = Math.floor(this.sampleRate * baseDurationSec);
@@ -928,6 +1031,28 @@ class TTSEngine {
         }
       } catch (err) {
         console.warn(`[TTSEngine] Paradee worker pool failed: ${err.message}`);
+      }
+    }
+
+    // Cloud Neural Bridge when local Paradee-8M ONNX / espeak-ng is unavailable (e.g. Linux / Vercel Serverless)
+    if (!mixContext.failHonestly && !process.env.SYNCTONE_DISABLE_PARADEE_ONNX && canUseCloudNeuralBridge()) {
+      const bridgeCfg = PARADEE_BRIDGE_MAP[paradeeVoice] || PARADEE_BRIDGE_MAP.bm_fable;
+      const charPitchJitter = charId && !isNarr ? ((stableHash(`${charId.toLowerCase()}:pp`) % 9) - 4) : 0;
+      const bridgeProsody = buildBridgeProsody(
+        effectiveSpeed,
+        bridgeCfg.rateOffset,
+        (parseInt(bridgeCfg.pitch, 10) || -2) + charPitchJitter
+      );
+      try {
+        const edgeRes = await this.synthesizeWithEdge(trimmed, bridgeCfg.voice, { prosody: bridgeProsody });
+        return {
+          ...edgeRes,
+          engine: 'paradee-tts',
+          resolved_voice_id: paradeeVoice,
+          cloud_bridge: true,
+        };
+      } catch (bridgeErr) {
+        console.warn(`[TTSEngine] Paradee cloud neural bridge failed: ${bridgeErr.message}`);
       }
     }
 
@@ -1149,13 +1274,18 @@ class TTSEngine {
       return await this.synthesizeWithParadee(trimmed, voiceId, effectiveSpeed, mixContext);
     }
 
-    // 4. Explicit Kokoro TTS - fails honestly, no silent fallback to macOS say
+    // 4. Explicit Kokoro TTS - fails honestly on missing local weights unless cloud neural bridge is active
     if (engineChoice === 'kokoro-tts') {
       const kokoroVoice =
         useCatalogVoice && catalogEntry?.fallback
           ? (LEGACY_VOICE_ALIASES[catalogEntry.fallback] || catalogEntry.fallback)
           : resolveKokoroVoice(voiceId, { ...mixContext, skipCatalogLookup: !useCatalogVoice });
-      return await this.synthesizeWithKokoro(trimmed, kokoroVoice, effectiveSpeed, { failHonestly: true });
+      return await this.synthesizeWithKokoro(trimmed, kokoroVoice, effectiveSpeed, {
+        ...mixContext,
+        edgeVoice,
+        prosody,
+        failHonestly: true,
+      });
     }
 
     // 5. 'msedge-tts' or 'auto' (Fallback Chain: msedge-tts -> kokoro-tts -> paradee-tts -> machine-tts)

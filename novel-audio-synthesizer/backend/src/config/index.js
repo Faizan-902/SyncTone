@@ -103,25 +103,49 @@ const config = {
     process.env.MONGO_URI ||
     'mongodb://synctone_user:synctone_pass@localhost:27017/synctone?authSource=admin',
 
-  // Unified Object Storage (S3-compatible, MongoDB Atlas GridFS, OpenStack Swift, or Local)
+  // Unified Object Storage (S3-compatible, Neon Object Storage AWS_* vars, MongoDB Atlas GridFS, OpenStack Swift, or Local)
   storage: {
     provider: (
       process.env.STORAGE_PROVIDER ||
-      (process.env.S3_ENDPOINT || process.env.S3_ACCESS_KEY_ID
+      (process.env.S3_ENDPOINT || process.env.AWS_ENDPOINT_URL_S3 || process.env.S3_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY_ID
         ? 's3'
         : process.env.MONGO_URI && !/localhost|127\.0\.0\.1/i.test(process.env.MONGO_URI)
           ? 'mongodb'
           : 'swift')
     ).toLowerCase(),
-    s3Endpoint: process.env.S3_ENDPOINT || '',
-    s3Region: process.env.S3_REGION || 'auto',
-    s3AccessKeyId: process.env.S3_ACCESS_KEY_ID || '',
-    s3SecretAccessKey: process.env.S3_SECRET_ACCESS_KEY || '',
+    s3Endpoint: process.env.S3_ENDPOINT || process.env.AWS_ENDPOINT_URL_S3 || '',
+    s3Region: process.env.S3_REGION || process.env.AWS_REGION || 'auto',
+    s3AccessKeyId: process.env.S3_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY_ID || '',
+    s3SecretAccessKey: process.env.S3_SECRET_ACCESS_KEY || process.env.AWS_SECRET_ACCESS_KEY || '',
     s3ForcePathStyle: process.env.S3_FORCE_PATH_STYLE !== 'false',
     bucketAudio: process.env.S3_BUCKET_AUDIO || process.env.SWIFT_CONTAINER_AUDIO || 'synctone-audio',
     bucketCovers: process.env.S3_BUCKET_COVERS || process.env.SWIFT_CONTAINER_COVERS || 'synctone-covers',
     publicAudioUrl: (process.env.STORAGE_PUBLIC_AUDIO_URL || '').replace(/\/$/, ''),
     publicCoversUrl: (process.env.STORAGE_PUBLIC_COVERS_URL || '').replace(/\/$/, ''),
+  },
+
+  // Multi-method Authentication (WebAuthn Passkeys + Google/GitHub OAuth + Neon Auth)
+  auth: {
+    rpName: process.env.WEBAUTHN_RP_NAME || 'SyncTone Audio Studio',
+    rpId: process.env.WEBAUTHN_RP_ID || undefined,
+    origin: process.env.APP_ORIGIN || process.env.FRONTEND_URL || undefined,
+    neonAuthBaseUrl: (
+      process.env.NEON_AUTH_BASE_URL ||
+      process.env.NEXT_PUBLIC_NEON_AUTH_URL ||
+      (/neon\.tech/i.test(process.env.DATABASE_URL || '')
+        ? 'https://ep-little-voice-az8eugmh.neonauth.c-3.ap-southeast-1.aws.neon.tech/neondb/auth'
+        : '')
+    ).replace(/\/$/, ''),
+    google: {
+      clientId: process.env.GOOGLE_CLIENT_ID || '',
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET || '',
+      redirectUri: process.env.GOOGLE_REDIRECT_URI || '',
+    },
+    github: {
+      clientId: process.env.GITHUB_CLIENT_ID || '',
+      clientSecret: process.env.GITHUB_CLIENT_SECRET || '',
+      redirectUri: process.env.GITHUB_REDIRECT_URI || '',
+    },
   },
 
   // OpenStack Swift

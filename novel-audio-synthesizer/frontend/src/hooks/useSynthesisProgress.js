@@ -22,7 +22,8 @@ export function useSynthesisProgress(chapterId) {
 
   const applyProgressPayload = useCallback((data) => {
     if (!isMountedRef.current || !data || typeof data !== 'object') return;
-    const status = (data.status || 'synthesizing').toLowerCase();
+    const rawStatus = String(data.status || 'synthesizing').toLowerCase();
+    const status = rawStatus === 'completed' ? 'complete' : rawStatus;
     const percent = typeof data.percent_complete === 'number' ? data.percent_complete : 0;
     const currentSeg = data.current_segment !== undefined ? data.current_segment : null;
     const totalSegs = data.total_segments !== undefined ? data.total_segments : null;
@@ -31,7 +32,7 @@ export function useSynthesisProgress(chapterId) {
     let msg = '';
     if (status === 'parsing') {
       msg = 'Parsing text & attributing character voices...';
-    } else if (status === 'synthesizing') {
+    } else if (status === 'synthesizing' || status === 'processing') {
       msg = currentSeg && totalSegs
         ? `Synthesizing audio segment ${currentSeg} of ${totalSegs} (${percent}%)`
         : `Synthesizing audio (${percent}%)`;
@@ -43,6 +44,7 @@ export function useSynthesisProgress(chapterId) {
       msg = errorMsg || 'Synthesis failed';
     }
 
+    const isTerminal = status === 'complete' || status === 'failed' || status === 'idle' || status === 'draft';
     setProgressState({
       status,
       percentComplete: percent,
@@ -50,16 +52,18 @@ export function useSynthesisProgress(chapterId) {
       totalSegments: totalSegs,
       message: msg,
       error: errorMsg,
-      isConnected: status !== 'complete' && status !== 'failed',
+      isConnected: !isTerminal,
       isComplete: status === 'complete',
       isFailed: status === 'failed',
     });
 
-    if (status === 'complete' || status === 'failed') {
+    if (isTerminal) {
       clearInterval(pingIntervalRef.current);
       clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
       if (sseRef.current) {
         try { sseRef.current.close(); } catch (_) {}
+        sseRef.current = null;
       }
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
         try { wsRef.current.close(); } catch (_) {}
@@ -67,12 +71,32 @@ export function useSynthesisProgress(chapterId) {
     }
   }, []);
 
-  const startHttpFallback = useCallback((id) => {
-    if (!id || typeof window === 'undefined') return;
+  const startHttpFallback = useCallback(async (id) => {
+    if (!id || typeof window === 'undefined' || !isMountedRef.current) return;
     const apiBase = (
       (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_API_BASE_URL) ||
       '/api'
     ).replace(/\/$/, '');
+
+    const ACTIVE_STATUSES = new Set(['parsing', 'synthesizing', 'processing', 'stitching']);
+    const fetchOnce = async () => {
+      try {
+        const resp = await fetch(`${apiBase}/chapters/${id}/progress`, { credentials: 'include' });
+        if (!resp.ok) return null;
+        return await resp.json();
+      } catch (_) {
+        return null;
+      }
+    };
+
+    // Initial check: only open SSE / poll if a synthesis job is actually active (eliminates idle polling)
+    const initial = await fetchOnce();
+    if (!isMountedRef.current) return;
+    const initialStatus = String(initial?.status || 'idle').toLowerCase();
+    if (!ACTIVE_STATUSES.has(initialStatus)) {
+      return;
+    }
+    applyProgressPayload(initial);
 
     if (typeof EventSource !== 'undefined' && !sseRef.current) {
       try {
@@ -94,15 +118,18 @@ export function useSynthesisProgress(chapterId) {
     if (!pollIntervalRef.current) {
       pollIntervalRef.current = setInterval(async () => {
         if (!isMountedRef.current) return;
-        try {
-          const resp = await fetch(`${apiBase}/chapters/${id}/progress`, { credentials: 'include' });
-          if (resp.ok) {
-            const payload = await resp.json();
-            if (payload && payload.status && payload.status !== 'idle' && payload.status !== 'draft') {
-              applyProgressPayload(payload);
-            }
+        const payload = await fetchOnce();
+        if (!payload || !isMountedRef.current) return;
+        const st = String(payload.status || 'idle').toLowerCase();
+        if (ACTIVE_STATUSES.has(st)) {
+          applyProgressPayload(payload);
+        } else {
+          clearInterval(pollIntervalRef.current);
+          pollIntervalRef.current = null;
+          if (st === 'complete' || st === 'completed' || st === 'failed') {
+            applyProgressPayload(payload);
           }
-        } catch (_) {}
+        }
       }, 2500);
     }
   }, [applyProgressPayload]);

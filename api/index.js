@@ -13,13 +13,11 @@ async function ensureInitialized() {
       await Promise.allSettled([
         connectMongo().catch((e) => console.warn('[Vercel DB] Mongo warning:', e.message)),
         connectPostgres()
-          .then(async () => {
-            try {
-              const { ensureVoiceCatalog } = require('../novel-audio-synthesizer/backend/src/scripts/seedDemos');
-              await ensureVoiceCatalog(pool);
-            } catch (e) {
-              console.warn('[Vercel DB] Voice catalog warning:', e.message);
-            }
+          .then(() => {
+            const { ensureVoiceCatalog } = require('../novel-audio-synthesizer/backend/src/scripts/seedDemos');
+            ensureVoiceCatalog(pool).catch((e) =>
+              console.warn('[Vercel DB] Voice catalog warning:', e.message)
+            );
           })
           .catch((e) => console.warn('[Vercel DB] Postgres warning:', e.message)),
       ]);

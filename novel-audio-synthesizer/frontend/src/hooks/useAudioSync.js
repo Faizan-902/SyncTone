@@ -209,6 +209,20 @@ export function useAudioSync(timeline = [], onSegmentChangeOrOptions = null, may
   const speechGenRef = useRef(0);
   const apiSpeakFailedRef = useRef(false);
   const activeUtteranceRef = useRef(null);
+  const segmentBlobCacheRef = useRef(new Map());
+  const inflightPrefetchRef = useRef(new Set());
+
+  const clearSegmentBlobCache = useCallback(() => {
+    for (const blobUrl of segmentBlobCacheRef.current.values()) {
+      try {
+        if (typeof URL !== 'undefined' && URL.revokeObjectURL) {
+          URL.revokeObjectURL(blobUrl);
+        }
+      } catch (_) {}
+    }
+    segmentBlobCacheRef.current.clear();
+    inflightPrefetchRef.current.clear();
+  }, []);
 
   const [activeSegmentId, setActiveSegmentId] = useState(-1);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -328,8 +342,9 @@ export function useAudioSync(timeline = [], onSegmentChangeOrOptions = null, may
         clearInterval(speechFallbackTimerRef.current);
         speechFallbackTimerRef.current = null;
       }
+      clearSegmentBlobCache();
     };
-  }, []);
+  }, [clearSegmentBlobCache]);
 
   // Forward declaration for speaking segment
   const speakActiveSegmentRef = useRef(null);
@@ -513,38 +528,23 @@ export function useAudioSync(timeline = [], onSegmentChangeOrOptions = null, may
     [advanceToNextSegment]
   );
 
-  // Main speech dispatcher: attempts /api/voices/speak -> falls back to window.speechSynthesis
-  const speakActiveSegment = useCallback(
-    (targetSegId, startFraction = 0) => {
-      stopSpeech();
-      speechCancelledRef.current = false;
-      const myGen = ++speechGenRef.current;
-
-      // Cleanly pause studio audio before playing TTS speech
-      if (audioRef.current) {
-        try {
-          audioRef.current.pause();
-        } catch (_) {}
-      }
-
-      const entryIndex = timeline.findIndex(
-        (t) => (t.segment_id !== undefined ? t.segment_id : t.order) === targetSegId
-      );
-      if (entryIndex === -1) return;
+  // Resolves character/engine/voice metadata & /api/voices/speak URL for any timeline index
+  const buildSegmentSpeakPayload = useCallback(
+    (entryIndex) => {
+      if (entryIndex < 0 || entryIndex >= timeline.length) return null;
       const entry = timeline[entryIndex];
+      if (!entry) return null;
 
-      const rawText = entry.text || '';
-      const cleanText = rawText.replace(/\[IMAGE:[^\]]*\]/gi, '').trim();
+      const cleanText = (entry.text || '').replace(/\[IMAGE:[^\]]*\]/gi, '').trim();
+      const targetSegId = entry.segment_id !== undefined ? entry.segment_id : entry.order;
       if (!cleanText) {
-        advanceToNextSegment(targetSegId);
-        return;
+        return { cleanText: '', entry, targetSegId };
       }
 
       const rawCharId = String(entry.character_id || entry.speaker_id || '').trim();
       const rawCharIdLower = rawCharId.toLowerCase();
       const isNarrator = entry.type === 'narration' || rawCharIdLower === 'narrator';
 
-      // For unattributed dialogue ('unresolved' or empty character_id), alternate speaker keys by dialogue turn index
       let resolvedCharacterId = entry.character_id || '';
       if (!isNarrator && (!rawCharId || rawCharIdLower === 'unresolved')) {
         let dialogueTurnIndex = 0;
@@ -552,9 +552,7 @@ export function useAudioSync(timeline = [], onSegmentChangeOrOptions = null, may
           const prev = timeline[i];
           const prevChar = String(prev?.character_id || prev?.speaker_id || '').trim().toLowerCase();
           const prevIsNarrator = prev?.type === 'narration' || prevChar === 'narrator';
-          if (!prevIsNarrator) {
-            dialogueTurnIndex += 1;
-          }
+          if (!prevIsNarrator) dialogueTurnIndex += 1;
         }
         resolvedCharacterId = dialogueTurnIndex % 2 === 0 ? 'dialogue_turn_even' : 'dialogue_turn_odd';
       }
@@ -589,8 +587,6 @@ export function useAudioSync(timeline = [], onSegmentChangeOrOptions = null, may
       const currentEngine = ttsEngineRef.current || ttsEngine || 'msedge-tts';
       let targetVoiceId =
         entry.assigned_voice_id || entry.voice_id || charProfile?.voice_id || charProfile?.assigned_voice_id || '';
-      let targetEngine = currentEngine;
-
       if (currentEngine === 'msedge-tts' && !targetVoiceId) {
         targetVoiceId = 'en-GB-RyanNeural';
       } else if ((currentEngine === 'kokoro-tts' || currentEngine === 'paradee-tts') && !targetVoiceId) {
@@ -604,30 +600,115 @@ export function useAudioSync(timeline = [], onSegmentChangeOrOptions = null, may
           ? { ...entry, character_id: resolvedCharacterId, gender: entryGender || entry.gender }
           : entry;
 
-      // Try /api/voices/speak with selected engine (including machine-tts first; fallback to window.speechSynthesis)
+      let speakUrl =
+        `/api/voices/speak?text=${encodeURIComponent(cleanText)}` +
+        `&voice_id=${encodeURIComponent(targetVoiceId)}` +
+        `&engine=${encodeURIComponent(currentEngine)}` +
+        `&character_id=${encodeURIComponent(resolvedCharacterId)}` +
+        `&speaker_name=${encodeURIComponent(entry.speaker_name || '')}` +
+        `&is_narrator=${isNarrator}` +
+        `&novel_id=${encodeURIComponent(novelId)}` +
+        `&chapter_id=${encodeURIComponent(chapterId)}`;
+
+      if (entryGender) {
+        speakUrl += `&gender=${encodeURIComponent(entryGender)}`;
+      }
+      if (resolvedCastSlot !== null && resolvedCastSlot !== '') {
+        speakUrl += `&cast_slot=${encodeURIComponent(String(resolvedCastSlot))}`;
+      }
+
+      return { cleanText, entry, effectiveEntry, targetSegId, currentEngine, speakUrl };
+    },
+    [timeline, resolvedCharacterMap, mixedCastMap, ttsEngine, currentNovelId, currentChapterId]
+  );
+
+  // Lookahead prefetcher: pre-downloads next 2 segments in browser RAM for zero-buffer transitions
+  const prefetchUpcomingSegments = useCallback(
+    (startIndex) => {
+      if (!isBrowserEnv || typeof fetch !== 'function' || typeof URL?.createObjectURL !== 'function') return;
+      if (apiSpeakFailedRef.current) return;
+
+      for (let offset = 1; offset <= 2; offset += 1) {
+        const idx = startIndex + offset;
+        const payload = buildSegmentSpeakPayload(idx);
+        if (!payload || !payload.cleanText || payload.currentEngine === 'machine-tts') continue;
+        const url = payload.speakUrl;
+        if (segmentBlobCacheRef.current.has(url) || inflightPrefetchRef.current.has(url)) continue;
+
+        inflightPrefetchRef.current.add(url);
+        fetch(url, { credentials: 'include' })
+          .then((resp) => (resp.ok ? resp.blob() : null))
+          .then((blob) => {
+            if (!blob || blob.size === 0) return;
+            if (segmentBlobCacheRef.current.size >= 25) {
+              const oldestKey = segmentBlobCacheRef.current.keys().next().value;
+              const oldestBlobUrl = segmentBlobCacheRef.current.get(oldestKey);
+              segmentBlobCacheRef.current.delete(oldestKey);
+              try {
+                if (oldestBlobUrl && URL.revokeObjectURL) URL.revokeObjectURL(oldestBlobUrl);
+              } catch (_) {}
+            }
+            segmentBlobCacheRef.current.set(url, URL.createObjectURL(blob));
+          })
+          .catch(() => {})
+          .finally(() => {
+            inflightPrefetchRef.current.delete(url);
+          });
+      }
+    },
+    [buildSegmentSpeakPayload]
+  );
+
+  // Main speech dispatcher: plays cached/live /api/voices/speak + lookahead prefetch -> falls back to speechSynthesis
+  const speakActiveSegment = useCallback(
+    (targetSegId, _startFraction = 0) => {
+      stopSpeech();
+      speechCancelledRef.current = false;
+      const myGen = ++speechGenRef.current;
+
+      // Cleanly pause studio audio before playing TTS speech
+      if (audioRef.current) {
+        try {
+          audioRef.current.pause();
+        } catch (_) {}
+      }
+
+      const entryIndex = timeline.findIndex(
+        (t) => (t.segment_id !== undefined ? t.segment_id : t.order) === targetSegId
+      );
+      if (entryIndex === -1) return;
+
+      const payload = buildSegmentSpeakPayload(entryIndex);
+      if (!payload || !payload.cleanText) {
+        advanceToNextSegment(targetSegId);
+        return;
+      }
+
+      const { entry, effectiveEntry, currentEngine, speakUrl } = payload;
+
+      // Zero-latency on-device SpeechSynthesis in live browser when Machine-TTS is explicitly chosen & device voices exist
+      const hasDeviceVoices =
+        typeof window !== 'undefined' &&
+        window.speechSynthesis &&
+        typeof window.speechSynthesis.getVoices === 'function' &&
+        window.speechSynthesis.getVoices().length > 0;
+      if (isBrowserEnv && currentEngine === 'machine-tts' && hasDeviceVoices) {
+        speakWithSpeechSynthesis(effectiveEntry, targetSegId, myGen);
+        return;
+      }
+
+      // Kick off zero-buffer 2-segment lookahead prefetch in parallel (browser only)
+      prefetchUpcomingSegments(entryIndex);
+
+      // Try /api/voices/speak with selected engine (including instant blob cache hit if already prefetched)
       if (!apiSpeakFailedRef.current && typeof Audio !== 'undefined') {
-        const voiceParam = encodeURIComponent(targetVoiceId);
-        const textParam = encodeURIComponent(cleanText);
-        const engineParam = encodeURIComponent(targetEngine);
-        const charIdParam = encodeURIComponent(resolvedCharacterId);
-        const speakerNameParam = encodeURIComponent(entry.speaker_name || '');
-        const novelIdParam = encodeURIComponent(novelId);
-        const chapterIdParam = encodeURIComponent(chapterId);
-
-        let speakUrl = `/api/voices/speak?text=${textParam}&voice_id=${voiceParam}&engine=${engineParam}&character_id=${charIdParam}&speaker_name=${speakerNameParam}&is_narrator=${isNarrator}&novel_id=${novelIdParam}&chapter_id=${chapterIdParam}`;
-        if (entryGender) {
-          speakUrl += `&gender=${encodeURIComponent(entryGender)}`;
-        }
-        if (resolvedCastSlot !== null && resolvedCastSlot !== '') {
-          speakUrl += `&cast_slot=${encodeURIComponent(String(resolvedCastSlot))}`;
-        }
-
         if (!secondaryAudioRef.current) {
           secondaryAudioRef.current = new Audio();
         }
 
+        const cachedBlobUrl = segmentBlobCacheRef.current.get(speakUrl);
         const secAudio = secondaryAudioRef.current;
-        secAudio.src = speakUrl;
+        secAudio.src = cachedBlobUrl || speakUrl;
         secAudio.playbackRate = playbackRateRef.current || 1.0;
 
         let secRafActive = false;
@@ -725,12 +806,9 @@ export function useAudioSync(timeline = [], onSegmentChangeOrOptions = null, may
       timeline,
       advanceToNextSegment,
       speakWithSpeechSynthesis,
-      ttsEngine,
-      currentNovelId,
-      currentChapterId,
       stopSpeech,
-      resolvedCharacterMap,
-      mixedCastMap,
+      buildSegmentSpeakPayload,
+      prefetchUpcomingSegments,
     ]
   );
 
@@ -746,12 +824,13 @@ export function useAudioSync(timeline = [], onSegmentChangeOrOptions = null, may
       ttsEngineRef.current = newEngine;
       setTtsEngine(newEngine);
       apiSpeakFailedRef.current = false;
+      clearSegmentBlobCache();
       stopSpeech();
       if (isPlaying && playbackModeRef.current === 'tts' && activeSegmentId !== -1) {
         speakActiveSegmentRef.current?.(activeSegmentId, segmentProgress);
       }
     },
-    [stopSpeech, isPlaying, activeSegmentId, segmentProgress]
+    [stopSpeech, clearSegmentBlobCache, isPlaying, activeSegmentId, segmentProgress]
   );
 
   useEffect(() => {

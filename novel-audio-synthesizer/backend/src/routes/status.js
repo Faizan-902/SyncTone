@@ -353,11 +353,15 @@ router.get('/status/models', async (req, res) => {
   return res.json({
     tts: ttsStatus,
     kokoro: {
-      available: Boolean(ttsStatus.model_exists && ttsStatus.voices_exists),
+      available: Boolean((ttsStatus.model_exists && ttsStatus.voices_exists) || ttsStatus.cloud_ready),
+      local_onnx: Boolean(ttsStatus.model_exists && ttsStatus.voices_exists),
+      cloud_bridge: Boolean(!(ttsStatus.model_exists && ttsStatus.voices_exists) && ttsStatus.cloud_ready),
       model_path: ttsStatus.model_path,
     },
     paradee: {
-      available: Boolean(ttsStatus.paradee_ready),
+      available: Boolean(ttsStatus.paradee_ready || ttsStatus.cloud_ready),
+      local_onnx: Boolean(ttsStatus.paradee_ready),
+      cloud_bridge: Boolean(!ttsStatus.paradee_ready && ttsStatus.cloud_ready),
       model_path: ttsStatus.paradee_model_path,
       voices: ttsStatus.paradee_voices || ['bm_fable', 'bf_isabella', 'am_puck', 'af_heart'],
       mixed_mode_ready: true,

@@ -1497,6 +1497,7 @@ router.post('/synthesize/:chapter_id', optionalAuth, async (req, res) => {
     `,
       [manifest.total_duration_ms, swiftAudioObject, chapter_id]
     );
+    invalidatePersistedAudioCache(chapter_id);
 
     // Update PostgreSQL synthesis_jobs queue via target relation
     await pool.query(
@@ -1821,41 +1822,60 @@ router.get('/chapters/:id/progress', async (req, res) => {
   }
 });
 
+const PERSISTED_AUDIO_CACHE_TTL_MS = 60000;
+const persistedAudioCache = new Map();
+
+function invalidatePersistedAudioCache(chapterId) {
+  if (chapterId) persistedAudioCache.delete(String(chapterId));
+  else persistedAudioCache.clear();
+}
+
 async function hasPersistedChapterAudio(chapterId, swiftAudioObject) {
+  if (process.env.NODE_ENV !== 'test') {
+    const cached = persistedAudioCache.get(String(chapterId));
+    if (cached && Date.now() - cached.ts < PERSISTED_AUDIO_CACHE_TTL_MS) {
+      return cached.value;
+    }
+  }
+
   const audioPathMp3 = path.join(config.paths.outputDir, `${chapterId}.mp3`);
   const audioPathWav = path.join(config.paths.outputDir, `${chapterId}.wav`);
   const hasMp3 = fs.existsSync(audioPathMp3) && fs.statSync(audioPathMp3).size > 0;
   const hasWav = fs.existsSync(audioPathWav) && fs.statSync(audioPathWav).size > 0;
-  if (hasMp3 || hasWav) return true;
+  if (hasMp3 || hasWav) {
+    persistedAudioCache.set(String(chapterId), { ts: Date.now(), value: true });
+    return true;
+  }
 
   if (storageService.isS3Configured()) {
     const candidates = Array.from(
       new Set([swiftAudioObject, `${chapterId}.mp3`, `${chapterId}.opus`, `${chapterId}.wav`].filter(Boolean))
     );
-    for (const key of candidates) {
-      if (await storageService.objectExists({ bucketType: 'audio', key })) {
-        return true;
-      }
-    }
+    const existsFlags = await Promise.all(
+      candidates.map((key) => storageService.objectExists({ bucketType: 'audio', key }).catch(() => false))
+    );
+    const found = existsFlags.some(Boolean);
+    persistedAudioCache.set(String(chapterId), { ts: Date.now(), value: found });
+    return found;
   }
+  persistedAudioCache.set(String(chapterId), { ts: Date.now(), value: false });
   return false;
 }
 
 /**
  * 6b. GET /api/chapters/:id
- * Fetches combined PostgreSQL metadata and MongoDB document details.
+ * Fetches combined PostgreSQL metadata and MongoDB document details in parallel.
  */
 router.get('/chapters/:id', async (req, res) => {
   const { id } = req.params;
   try {
-    let pgData = {};
-    if (UUID_REGEX.test(id)) {
-      const pgRes = await pool.query('SELECT * FROM chapters WHERE id = $1', [id]);
-      if (pgRes.rows.length > 0) {
-        pgData = pgRes.rows[0];
-      }
-    }
-    const chapterDoc = await Chapter.findOne({ pg_chapter_id: id });
+    const [pgRes, chapterDoc] = await Promise.all([
+      UUID_REGEX.test(id)
+        ? pool.query('SELECT * FROM chapters WHERE id = $1', [id])
+        : Promise.resolve({ rows: [] }),
+      Chapter.findOne({ pg_chapter_id: id }),
+    ]);
+    const pgData = pgRes.rows.length > 0 ? pgRes.rows[0] : {};
 
     if (Object.keys(pgData).length === 0 && !chapterDoc) {
       return res.status(404).json({ error: 'Chapter not found' });

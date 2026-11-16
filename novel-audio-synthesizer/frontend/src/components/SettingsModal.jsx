@@ -383,7 +383,9 @@ export default function SettingsModal({
   }, [onClose]);
 
   const kokoroAvailable = Boolean(modelStatus?.kokoro?.available || modelStatus?.tts?.model_exists);
+  const kokoroCloudBridge = Boolean(modelStatus?.kokoro?.cloud_bridge && !modelStatus?.tts?.model_exists);
   const paradeeAvailable = Boolean(modelStatus?.paradee?.model_exists || modelStatus?.paradee?.available || modelStatus?.tts?.paradee_ready);
+  const paradeeCloudBridge = Boolean(modelStatus?.paradee?.cloud_bridge && !modelStatus?.tts?.paradee_ready);
 
   return (
     <div
@@ -489,7 +491,7 @@ export default function SettingsModal({
                   </div>
                   <p className="theme-muted text-[10px] mt-0.5 font-mono">
                     {kokoroAvailable
-                      ? 'Local voice package installed'
+                      ? (kokoroCloudBridge ? 'Cloud Neural Expressive Bridge ready' : 'Local voice package installed')
                       : "This voice isn't available right now. Try another one."}
                   </p>
                 </div>
@@ -500,7 +502,7 @@ export default function SettingsModal({
                       : 'bg-[var(--bg-surface)] text-[var(--text-muted)] border-[var(--border-subtle)]'
                   }`}
                 >
-                  {kokoroAvailable ? 'Ready' : 'Unavailable'}
+                  {kokoroAvailable ? (kokoroCloudBridge ? 'Cloud Ready' : 'Ready') : 'Unavailable'}
                 </span>
               </button>
 
@@ -568,7 +570,7 @@ export default function SettingsModal({
                       : 'bg-[var(--bg-surface)] text-[var(--text-muted)] border-[var(--border-subtle)]'
                   }`}
                 >
-                  {paradeeAvailable ? 'Paradee Ready' : 'OS Fallback'}
+                  {paradeeAvailable ? (paradeeCloudBridge ? 'Cloud Bridge' : 'Paradee Ready') : 'OS Fallback'}
                 </span>
               </button>
 
