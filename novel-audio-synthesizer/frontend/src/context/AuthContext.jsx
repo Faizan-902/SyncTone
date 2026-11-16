@@ -257,9 +257,11 @@ export function AuthProvider({ children }) {
       ).replace(/\/$/, '');
 
       // Google uses server-side redirect (/api/auth/oauth/google/start -> direct Google OR Neon Auth bridge)
-      // Avoiding cross-origin browser fetch eliminates CORS/403 & third-party cookie blocks.
+      // Pass current window.location.origin so preview deployments return to the exact active build.
       if (prov === 'google') {
-        window.location.assign(`${apiBase}/auth/oauth/google/start`);
+        const originParam = encodeURIComponent(window.location.origin);
+        const nextParam = encodeURIComponent(window.location.pathname || '/');
+        window.location.assign(`${apiBase}/auth/oauth/google/start?origin=${originParam}&next=${nextParam}`);
         return { success: true };
       }
 

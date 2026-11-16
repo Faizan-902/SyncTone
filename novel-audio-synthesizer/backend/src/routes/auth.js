@@ -785,6 +785,17 @@ function resolveTrustedNeonOrigin(baseOrigin) {
   return 'https://synctone-five.vercel.app';
 }
 
+function isSafeReturnOrigin(candidate) {
+  if (!candidate || typeof candidate !== 'string') return false;
+  const clean = candidate.replace(/\/$/, '');
+  return (
+    /^https:\/\/[a-z0-9-]+\.vercel\.app$/i.test(clean) ||
+    /^http:\/\/localhost(?::\d+)?$/i.test(clean) ||
+    /^http:\/\/127\.0\.0\.1(?::\d+)?$/i.test(clean) ||
+    (config.auth?.origin && clean === config.auth.origin.replace(/\/$/, ''))
+  );
+}
+
 /**
  * GET /api/auth/oauth/:provider/start
  * Initiates OAuth 2.0 login flow for Google or GitHub (direct or via server-side Neon Auth redirect).
@@ -792,6 +803,8 @@ function resolveTrustedNeonOrigin(baseOrigin) {
 router.get('/auth/oauth/:provider/start', async (req, res) => {
   const provider = String(req.params.provider || '').toLowerCase();
   const { baseOrigin } = resolveWebAuthnContext(req);
+  const requestedOrigin = typeof req.query.origin === 'string' ? req.query.origin.replace(/\/$/, '') : '';
+  const returnOrigin = isSafeReturnOrigin(requestedOrigin) ? requestedOrigin : baseOrigin;
   const returnTo = typeof req.query.next === 'string' && req.query.next.startsWith('/') ? req.query.next : '/';
 
   if (!['google', 'github'].includes(provider)) {
@@ -803,13 +816,13 @@ router.get('/auth/oauth/:provider/start', async (req, res) => {
     const state = crypto.randomBytes(24).toString('base64url');
     const callbackUrl =
       (provider === 'google' ? config.auth?.google?.redirectUri : config.auth?.github?.redirectUri) ||
-      `${baseOrigin}/api/auth/oauth/${provider}/callback`;
+      `${returnOrigin}/api/auth/oauth/${provider}/callback`;
 
     if (provider === 'google' && config.auth?.google?.clientId && config.auth?.google?.clientSecret) {
       await pool.query(
         `INSERT INTO auth_challenges (challenge_id, challenge, flow_type, metadata, expires_at)
-         VALUES ($1, $1, 'oauth_google', $2::jsonb, $3)`,
-        [state, JSON.stringify({ returnTo, callbackUrl, baseOrigin }), new Date(Date.now() + 10 * 60 * 1000)]
+         VALUES ($1::varchar, $1::text, 'oauth_google', $2::jsonb, $3)`,
+        [state, JSON.stringify({ returnTo, callbackUrl, baseOrigin: returnOrigin }), new Date(Date.now() + 10 * 60 * 1000)]
       );
       const params = new URLSearchParams({
         client_id: config.auth.google.clientId,
@@ -822,10 +835,11 @@ router.get('/auth/oauth/:provider/start', async (req, res) => {
       return res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`);
     }
 
-    // Server-side Neon Managed Auth Social OAuth flow (avoids browser CORS/403 & 3rd-party cookie blocks)
+    // Server-side Neon Managed Auth Social OAuth flow (avoids browser CORS/403 & cross-deployment cookie loss)
     if (provider === 'google' && config.auth?.neonAuthBaseUrl) {
-      const trustedOrigin = resolveTrustedNeonOrigin(baseOrigin);
-      const neonCallbackUrl = `${trustedOrigin}/api/auth/oauth/neon/callback`;
+      const challengeId = crypto.randomUUID();
+      const trustedOrigin = resolveTrustedNeonOrigin(returnOrigin);
+      const neonCallbackUrl = `${trustedOrigin}/api/auth/oauth/neon/callback?cid=${encodeURIComponent(challengeId)}`;
       const neonResp = await axios.post(
         `${config.auth.neonAuthBaseUrl}/sign-in/social`,
         {
@@ -843,7 +857,7 @@ router.get('/auth/oauth/:provider/start', async (req, res) => {
 
       const oauthUrl = neonResp.data?.url;
       if (!oauthUrl) {
-        return res.redirect(`${baseOrigin}/?auth_error=google_no_redirect_url`);
+        return res.redirect(`${returnOrigin}/?auth_error=google_no_redirect_url`);
       }
 
       const rawSetCookies = Array.isArray(neonResp.headers['set-cookie'])
@@ -856,14 +870,13 @@ router.get('/auth/oauth/:provider/start', async (req, res) => {
         .filter(Boolean)
         .join('; ');
 
-      const challengeId = crypto.randomUUID();
       await pool.query(
         `INSERT INTO auth_challenges (challenge_id, challenge, flow_type, metadata, expires_at)
          VALUES ($1, $2, 'neon_oauth', $3::jsonb, $4)`,
         [
           challengeId,
           challengeCookiePairs,
-          JSON.stringify({ returnOrigin: baseOrigin, trustedOrigin, returnTo }),
+          JSON.stringify({ returnOrigin, trustedOrigin, returnTo }),
           new Date(Date.now() + 10 * 60 * 1000),
         ]
       );
@@ -879,8 +892,8 @@ router.get('/auth/oauth/:provider/start', async (req, res) => {
     if (provider === 'github' && config.auth?.github?.clientId && config.auth?.github?.clientSecret) {
       await pool.query(
         `INSERT INTO auth_challenges (challenge_id, challenge, flow_type, metadata, expires_at)
-         VALUES ($1, $1, 'oauth_github', $2::jsonb, $3)`,
-        [state, JSON.stringify({ returnTo, callbackUrl, baseOrigin }), new Date(Date.now() + 10 * 60 * 1000)]
+         VALUES ($1::varchar, $1::text, 'oauth_github', $2::jsonb, $3)`,
+        [state, JSON.stringify({ returnTo, callbackUrl, baseOrigin: returnOrigin }), new Date(Date.now() + 10 * 60 * 1000)]
       );
       const params = new URLSearchParams({
         client_id: config.auth.github.clientId,
@@ -891,21 +904,25 @@ router.get('/auth/oauth/:provider/start', async (req, res) => {
       return res.redirect(`https://github.com/login/oauth/authorize?${params.toString()}`);
     }
 
-    return res.redirect(`${baseOrigin}/?auth_error=${provider}_not_configured`);
+    return res.redirect(`${returnOrigin}/?auth_error=${provider}_not_configured`);
   } catch (err) {
     console.error(`[OAuth Start Error - ${provider}]:`, err.message);
-    return res.redirect(`${baseOrigin}/?auth_error=${provider}_start_failed`);
+    return res.redirect(`${returnOrigin}/?auth_error=${provider}_start_failed`);
   }
 });
 
 /**
  * GET /api/auth/oauth/neon/callback
  * Exchanges Neon Auth verifier + stored session_challenge cookie server-side for verified Google user session.
+ * Uses ?cid= query param so cross-deployment Vercel previews restore session seamlessly via /oauth/handoff.
  */
 router.get('/auth/oauth/neon/callback', async (req, res) => {
   const { baseOrigin } = resolveWebAuthnContext(req);
   const verifier = req.query?.neon_auth_session_verifier;
-  const challengeId = req.cookies?.synctone_neon_challenge;
+  const challengeId =
+    (typeof req.query?.cid === 'string' && req.query.cid.trim()) ||
+    req.cookies?.synctone_neon_challenge ||
+    '';
 
   if (!config.auth?.neonAuthBaseUrl) {
     return res.redirect(`${baseOrigin}/?auth_error=google_not_configured`);
@@ -919,6 +936,7 @@ router.get('/auth/oauth/neon/callback', async (req, res) => {
   try {
     await ensureAuthSchemaTables(pool);
 
+    let chRows = [];
     if (challengeId) {
       const chRes = await pool.query(
         `DELETE FROM auth_challenges
@@ -926,13 +944,30 @@ router.get('/auth/oauth/neon/callback', async (req, res) => {
          RETURNING *`,
         [String(challengeId)]
       );
-      if (chRes.rows.length > 0) {
-        cookieHeader = chRes.rows[0].challenge || '';
-        const meta = chRes.rows[0].metadata || {};
-        returnOrigin = meta.returnOrigin || baseOrigin;
-        returnTo = meta.returnTo || '/';
-        trustedOrigin = meta.trustedOrigin || trustedOrigin;
+      chRows = chRes.rows;
+    }
+
+    if (chRows.length === 0) {
+      const fallbackRes = await pool.query(
+        `DELETE FROM auth_challenges
+         WHERE challenge_id = (
+           SELECT challenge_id FROM auth_challenges
+           WHERE flow_type = 'neon_oauth' AND expires_at > now()
+           ORDER BY created_at DESC LIMIT 1
+         )
+         RETURNING *`
+      );
+      chRows = fallbackRes.rows;
+    }
+
+    if (chRows.length > 0) {
+      cookieHeader = chRows[0].challenge || '';
+      const meta = chRows[0].metadata || {};
+      if (isSafeReturnOrigin(meta.returnOrigin)) {
+        returnOrigin = meta.returnOrigin.replace(/\/$/, '');
       }
+      returnTo = meta.returnTo || '/';
+      trustedOrigin = meta.trustedOrigin || trustedOrigin;
     }
 
     res.clearCookie('synctone_neon_challenge', getCookieSettings());
@@ -980,11 +1015,66 @@ router.get('/auth/oauth/neon/callback', async (req, res) => {
     });
 
     issueSessionCookie(res, userRecord);
+
+    // If user initiated Google login from a Vercel preview deployment (different origin from trustedOrigin),
+    // bridge via single-use handoff code so the preview deployment sets its own first-party cookie cleanly.
+    if (returnOrigin && returnOrigin !== trustedOrigin && isSafeReturnOrigin(returnOrigin)) {
+      const handoffCode = crypto.randomBytes(24).toString('base64url');
+      await pool.query(
+        `INSERT INTO auth_challenges (challenge_id, challenge, user_id, flow_type, metadata, expires_at)
+         VALUES ($1::varchar, $1::text, $2, 'oauth_handoff', $3::jsonb, $4)`,
+        [handoffCode, userRecord.id, JSON.stringify({ returnTo }), new Date(Date.now() + 2 * 60 * 1000)]
+      );
+      return res.redirect(`${returnOrigin}/api/auth/oauth/handoff?code=${encodeURIComponent(handoffCode)}`);
+    }
+
     const sep = returnTo.includes('?') ? '&' : '?';
     return res.redirect(`${returnOrigin}${returnTo}${sep}auth=success&provider=google`);
   } catch (err) {
     console.error('[Neon OAuth Callback Error]:', err.message);
     return res.redirect(`${returnOrigin}/?auth_error=google_callback_failed`);
+  }
+});
+
+/**
+ * GET /api/auth/oauth/handoff
+ * Redeems a single-use OAuth handoff code to set a first-party session cookie on the originating deployment URL.
+ */
+router.get('/auth/oauth/handoff', async (req, res) => {
+  const { baseOrigin } = resolveWebAuthnContext(req);
+  const code = typeof req.query?.code === 'string' ? req.query.code.trim() : '';
+
+  if (!code) {
+    return res.redirect(`${baseOrigin}/?auth_error=missing_handoff_code`);
+  }
+
+  try {
+    await ensureAuthSchemaTables(pool);
+    const chRes = await pool.query(
+      `DELETE FROM auth_challenges
+       WHERE challenge_id = $1 AND flow_type = 'oauth_handoff' AND expires_at > now()
+       RETURNING *`,
+      [code]
+    );
+    if (chRes.rows.length === 0 || !chRes.rows[0].user_id) {
+      return res.redirect(`${baseOrigin}/?auth_error=invalid_handoff_code`);
+    }
+
+    const userRes = await pool.query(
+      'SELECT id, username, email, role, avatar_url FROM users WHERE id = $1 LIMIT 1',
+      [chRes.rows[0].user_id]
+    );
+    if (userRes.rows.length === 0) {
+      return res.redirect(`${baseOrigin}/?auth_error=handoff_user_missing`);
+    }
+
+    issueSessionCookie(res, userRes.rows[0]);
+    const returnTo = chRes.rows[0].metadata?.returnTo || '/';
+    const sep = returnTo.includes('?') ? '&' : '?';
+    return res.redirect(`${baseOrigin}${returnTo}${sep}auth=success&provider=google`);
+  } catch (err) {
+    console.error('[OAuth Handoff Error]:', err.message);
+    return res.redirect(`${baseOrigin}/?auth_error=handoff_failed`);
   }
 });
 
