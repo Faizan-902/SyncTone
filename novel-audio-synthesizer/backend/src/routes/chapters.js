@@ -1623,9 +1623,49 @@ router.all('/stream/:chapter_id', async (req, res, next) => {
           return s3Obj.stream.pipe(res);
         }
       } catch (s3Err) {
-        console.warn('[Stream S3 Fallback Warning]:', s3Err.message);
+        console.warn('[Stream Cloud Fallback Warning]:', s3Err.message);
       }
     }
+
+    // Lightweight in-memory fallback buffer for un-synthesized placeholder chapters in zero-S3/MongoDB-M0 mode
+    if (UUID_REGEX.test(cleanId)) {
+      try {
+        const chCheck = await pool.query('SELECT id FROM chapters WHERE id = $1', [cleanId]);
+        if (chCheck.rows.length > 0) {
+          const fallbackBuf = audioStitcher.createMp3SilenceBuffer(5000);
+          const total = fallbackBuf.length;
+          const baseHeaders = {
+            'Content-Type': 'audio/mpeg',
+            'Accept-Ranges': 'bytes',
+            'Cache-Control': 'public, max-age=3600',
+          };
+          if (req.method === 'HEAD') {
+            res.writeHead(200, { ...baseHeaders, 'Content-Length': total });
+            return res.end();
+          }
+          const rangeHdr = req.headers.range;
+          if (rangeHdr) {
+            const parts = rangeHdr.replace(/bytes=/, '').split('-');
+            const start = parseInt(parts[0], 10);
+            const end = Math.min(parts[1] ? parseInt(parts[1], 10) : total - 1, total - 1);
+            if (isNaN(start) || start < 0 || start >= total || start > end) {
+              res.writeHead(416, { ...baseHeaders, 'Content-Range': `bytes */${total}` });
+              return res.end();
+            }
+            const slice = fallbackBuf.subarray(start, end + 1);
+            res.writeHead(206, {
+              ...baseHeaders,
+              'Content-Range': `bytes ${start}-${end}/${total}`,
+              'Content-Length': slice.length,
+            });
+            return res.end(slice);
+          }
+          res.writeHead(200, { ...baseHeaders, 'Content-Length': total });
+          return res.end(fallbackBuf);
+        }
+      } catch (_) {}
+    }
+
     return res.status(404).json({ detail: 'Audio file not found' });
   }
 

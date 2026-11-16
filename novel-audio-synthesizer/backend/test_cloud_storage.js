@@ -161,7 +161,7 @@ async function runCloudAdapterTests() {
       assert.strictEqual(streamRes.headers['Content-Range'], 'bytes 0-3/5');
       assert(sentCommands.includes('PutObjectCommand'));
       assert(sentCommands.includes('GetObjectCommand'));
-      console.log('  ✔ [4/4] storageService PutObject / 206 Range GetObjectStream verified');
+      console.log('  ✔ [4/5] storageService PutObject / 206 Range GetObjectStream verified');
     } finally {
       S3Client.prototype.send = origSend;
       process.env = envBackup;
@@ -177,7 +177,32 @@ async function runCloudAdapterTests() {
     }
   }
 
-  console.log('\n🎉 All 4 Free Cloud Hosting & Storage unit checks passed!');
+  // 5. Verify MongoDB Atlas GridFS provider activation & range streaming contract
+  {
+    const envBackup = { ...process.env };
+    try {
+      process.env.STORAGE_PROVIDER = 'mongodb';
+      delete process.env.S3_ACCESS_KEY_ID;
+      delete process.env.S3_SECRET_ACCESS_KEY;
+      delete require.cache[require.resolve('./src/config')];
+      delete require.cache[require.resolve('./src/services/storageService')];
+
+      const { storageService } = require('./src/services/storageService');
+      assert.strictEqual(storageService.isMongoStorageConfigured(), true, 'Mongo GridFS provider enabled');
+      assert.strictEqual(storageService.isS3Configured(), true, 'Cloud storage flag active for Mongo GridFS');
+      assert.strictEqual(
+        storageService.getPublicUrl({ bucketType: 'covers', key: 'hp1_cover.jpg' }),
+        '/static/covers/hp1_cover.jpg'
+      );
+      console.log('  ✔ [5/5] MongoDB GridFS storage provider (STORAGE_PROVIDER=mongodb) verified');
+    } finally {
+      process.env = envBackup;
+      delete require.cache[require.resolve('./src/config')];
+      delete require.cache[require.resolve('./src/services/storageService')];
+    }
+  }
+
+  console.log('\n🎉 All 5 Free Cloud Hosting & Storage unit checks passed!');
 }
 
 runCloudAdapterTests()

@@ -100,7 +100,10 @@ async function ensureChapterAudio(chapterId, segments, { maxSynthesizeCount = 0 
       (fs.existsSync(wavPath) && fs.statSync(wavPath).size > 0)) {
     const isWav = fs.existsSync(wavPath) && (!fs.existsSync(mp3Path) || fs.statSync(wavPath).mtimeMs > fs.statSync(mp3Path).mtimeMs);
     const format = isWav ? 'wav' : 'mp3';
-    if (storageService.isS3Configured()) {
+    const shouldUploadCloud =
+      storageService.isS3Configured() &&
+      (maxSynthesizeCount > 0 || !storageService.isMongoStorageConfigured());
+    if (shouldUploadCloud) {
       const existingPath = isWav ? wavPath : mp3Path;
       const existingBuffer = fs.readFileSync(existingPath);
       await storageService.putObject({
@@ -108,7 +111,7 @@ async function ensureChapterAudio(chapterId, segments, { maxSynthesizeCount = 0 
         key: `${chapterId}.${format}`,
         body: existingBuffer,
         contentType: format === 'mp3' ? 'audio/mpeg' : 'audio/wav',
-      }).catch((e) => console.warn(`  [Storage Warning] S3 demo upload skipped for ${chapterId}:`, e.message));
+      }).catch((e) => console.warn(`  [Storage Warning] Cloud demo upload skipped for ${chapterId}:`, e.message));
     }
     return {
       chapter_id: chapterId,
@@ -198,13 +201,16 @@ async function ensureChapterAudio(chapterId, segments, { maxSynthesizeCount = 0 
     if (!validateAudioBuffer(savedBuffer, audioFmt)) {
       console.warn(`  [Audio Warning] Audio buffer validation warning for ${savedAudioPath}`);
     }
-    if (storageService.isS3Configured()) {
+    const shouldUploadCloud =
+      storageService.isS3Configured() &&
+      (maxSynthesizeCount > 0 || !storageService.isMongoStorageConfigured());
+    if (shouldUploadCloud) {
       await storageService.putObject({
         bucketType: 'audio',
         key: `${chapterId}.${audioFmt}`,
         body: savedBuffer,
         contentType: audioFmt === 'mp3' ? 'audio/mpeg' : 'audio/wav',
-      }).catch((e) => console.warn(`  [Storage Warning] S3 demo upload skipped for ${chapterId}:`, e.message));
+      }).catch((e) => console.warn(`  [Storage Warning] Cloud demo upload skipped for ${chapterId}:`, e.message));
     }
   }
 

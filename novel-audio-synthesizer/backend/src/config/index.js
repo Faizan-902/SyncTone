@@ -103,11 +103,15 @@ const config = {
     process.env.MONGO_URI ||
     'mongodb://synctone_user:synctone_pass@localhost:27017/synctone?authSource=admin',
 
-  // Unified Object Storage (S3-compatible: Supabase Storage S3, Backblaze B2, Cloudflare R2, MinIO, Swift, or Local)
+  // Unified Object Storage (S3-compatible, MongoDB Atlas GridFS, OpenStack Swift, or Local)
   storage: {
     provider: (
       process.env.STORAGE_PROVIDER ||
-      (process.env.S3_ENDPOINT || process.env.S3_ACCESS_KEY_ID ? 's3' : 'swift')
+      (process.env.S3_ENDPOINT || process.env.S3_ACCESS_KEY_ID
+        ? 's3'
+        : process.env.MONGO_URI && !/localhost|127\.0\.0\.1/i.test(process.env.MONGO_URI)
+          ? 'mongodb'
+          : 'swift')
     ).toLowerCase(),
     s3Endpoint: process.env.S3_ENDPOINT || '',
     s3Region: process.env.S3_REGION || 'auto',

@@ -67,28 +67,34 @@ function createApp() {
   app.use('/static/audio', express.static(config.paths.outputDir));
   app.use('/static/covers', express.static(path.join(config.paths.outputDir, 'covers')));
   app.use('/static/covers', express.static(path.resolve(__dirname, '../output/covers')));
+  app.use('/static/covers', express.static(path.resolve(__dirname, '../../frontend/public/covers')));
   app.get('/static/covers/:fileName', async (req, res, next) => {
     try {
       const safeName = path.basename(req.params.fileName || '');
-      if (!safeName || !storageService.isS3Configured()) {
+      if (!safeName) {
         return next();
       }
-      const s3Obj = await storageService.getObjectStream({ bucketType: 'covers', key: safeName });
-      if (!s3Obj || !s3Obj.stream) {
-        return next();
+      if (storageService.isS3Configured()) {
+        const s3Obj = await storageService.getObjectStream({ bucketType: 'covers', key: safeName });
+        if (s3Obj && s3Obj.stream) {
+          res.status(s3Obj.status || 200);
+          Object.entries(s3Obj.headers || {}).forEach(([k, v]) => {
+            if (v !== undefined) res.setHeader(k, String(v));
+          });
+          if (!res.getHeader('Content-Type')) {
+            const lower = safeName.toLowerCase();
+            res.setHeader(
+              'Content-Type',
+              lower.endsWith('.png') ? 'image/png' : lower.endsWith('.webp') ? 'image/webp' : 'image/jpeg'
+            );
+          }
+          return s3Obj.stream.pipe(res);
+        }
       }
-      res.status(s3Obj.status || 200);
-      Object.entries(s3Obj.headers || {}).forEach(([k, v]) => {
-        if (v !== undefined) res.setHeader(k, String(v));
-      });
-      if (!res.getHeader('Content-Type')) {
-        const lower = safeName.toLowerCase();
-        res.setHeader(
-          'Content-Type',
-          lower.endsWith('.png') ? 'image/png' : lower.endsWith('.webp') ? 'image/webp' : 'image/jpeg'
-        );
+      if (process.env.VERCEL) {
+        return res.redirect(302, `/covers/${encodeURIComponent(safeName)}`);
       }
-      return s3Obj.stream.pipe(res);
+      return next();
     } catch (err) {
       console.warn('[StaticCover Fallback Warning]:', err.message);
       return next();

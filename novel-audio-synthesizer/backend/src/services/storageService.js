@@ -1,21 +1,31 @@
 /**
  * Unified Object Storage Service for SyncTone.
  *
- * Supports 100% free S3-compatible bucket providers (Supabase Storage S3,
- * Backblaze B2, Cloudflare R2, MinIO), legacy OpenStack Swift, and local disk cache.
+ * Supports 100% free cloud storage providers:
+ * - MongoDB Atlas GridFS (`STORAGE_PROVIDER=mongodb|gridfs`, zero extra services needed)
+ * - S3-compatible buckets (`s3`, `r2`, `supabase`, `b2`)
+ * - Legacy OpenStack Swift and local disk cache
  */
 
 const fs = require('fs');
 const path = require('path');
 const { Readable } = require('stream');
+const mongoose = require('mongoose');
 const { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand } = require('@aws-sdk/client-s3');
 const { config } = require('../config');
 
 const S3_PROVIDERS = new Set(['s3', 'r2', 'supabase', 'b2']);
+const MONGO_PROVIDERS = new Set(['mongodb', 'gridfs', 'mongo']);
+const GRIDFS_BUCKET_NAME = 'synctone_storage';
 
 let cachedS3Client = null;
 
-function isS3Configured() {
+function isMongoStorageConfigured() {
+  const s = config.storage || {};
+  return MONGO_PROVIDERS.has(s.provider);
+}
+
+function isStrictS3Configured() {
   const s = config.storage || {};
   return Boolean(
     S3_PROVIDERS.has(s.provider) &&
@@ -24,8 +34,16 @@ function isS3Configured() {
   );
 }
 
+/**
+ * Returns true when any remote cloud object store (S3-compatible or MongoDB GridFS)
+ * is configured as the active backend.
+ */
+function isS3Configured() {
+  return isStrictS3Configured() || isMongoStorageConfigured();
+}
+
 function getS3Client() {
-  if (!isS3Configured()) return null;
+  if (!isStrictS3Configured()) return null;
   if (!cachedS3Client) {
     const s = config.storage;
     cachedS3Client = new S3Client({
@@ -39,6 +57,16 @@ function getS3Client() {
     });
   }
   return cachedS3Client;
+}
+
+function getGridFSBucket() {
+  if (!isMongoStorageConfigured()) return null;
+  if (!mongoose.connection || mongoose.connection.readyState !== 1 || !mongoose.connection.db) {
+    return null;
+  }
+  return new mongoose.mongo.GridFSBucket(mongoose.connection.db, {
+    bucketName: GRIDFS_BUCKET_NAME,
+  });
 }
 
 function resolveBucket(bucketType) {
@@ -56,6 +84,7 @@ function resolveLocalPaths(bucketType, key) {
       path.join(config.paths.outputDir, 'covers', safeKey),
       path.resolve(__dirname, '../../output/covers', safeKey),
       path.resolve(__dirname, '../../../output/covers', safeKey),
+      path.resolve(__dirname, '../../../frontend/public/covers', safeKey),
     ];
   }
   return [path.join(config.paths.outputDir, safeKey)];
@@ -65,14 +94,13 @@ function getPublicUrl({ bucketType = 'covers', key }) {
   const safeKey = path.basename(String(key || ''));
   const s = config.storage || {};
   if (bucketType === 'covers') {
-    if (s.publicCoversUrl) {
+    if (s.publicCoversUrl && isStrictS3Configured()) {
       const candidate = `${s.publicCoversUrl}/${encodeURIComponent(safeKey)}`;
-      // Preserve PostgreSQL novels.cover_object VARCHAR(255) safety
       if (candidate.length <= 255) return candidate;
     }
     return `/static/covers/${safeKey}`;
   }
-  if (s.publicAudioUrl) {
+  if (s.publicAudioUrl && isStrictS3Configured()) {
     return `${s.publicAudioUrl}/${encodeURIComponent(safeKey)}`;
   }
   return `/api/stream/${safeKey.replace(/\.(mp3|wav|opus)$/i, '')}`;
@@ -87,6 +115,71 @@ function toNodeStream(body) {
   return null;
 }
 
+function toBuffer(body) {
+  if (Buffer.isBuffer(body)) return body;
+  if (typeof body === 'string') return Buffer.from(body);
+  if (body instanceof Uint8Array) return Buffer.from(body.buffer, body.byteOffset, body.byteLength);
+  return Buffer.from(body);
+}
+
+function parseByteRange(rangeHeader, totalSize) {
+  if (!rangeHeader) return null;
+  const trimmed = String(rangeHeader).trim();
+  const match = /^bytes=(\d*)-(\d*)$/i.exec(trimmed);
+  if (!match || (match[1] === '' && match[2] === '')) {
+    return { invalid: true };
+  }
+
+  let start;
+  let end;
+  if (match[1] === '') {
+    const suffixLen = parseInt(match[2], 10);
+    if (isNaN(suffixLen) || suffixLen <= 0) return { invalid: true };
+    start = Math.max(0, totalSize - suffixLen);
+    end = totalSize - 1;
+  } else {
+    start = parseInt(match[1], 10);
+    end = match[2] ? parseInt(match[2], 10) : totalSize - 1;
+  }
+
+  end = Math.min(end, totalSize - 1);
+  if (isNaN(start) || isNaN(end) || start < 0 || start >= totalSize || start > end) {
+    return { invalid: true };
+  }
+  return { start, end, invalid: false };
+}
+
+async function putGridFSObject({ gridName, body, contentType, cacheControl, bucketType, safeKey }) {
+  const bucket = getGridFSBucket();
+  if (!bucket) return false;
+
+  const existing = await bucket.find({ filename: gridName }).toArray();
+  for (const doc of existing) {
+    await bucket.delete(doc._id).catch(() => {});
+  }
+
+  const buffer = toBuffer(body);
+  const ct = contentType || 'application/octet-stream';
+  const cc = cacheControl || 'public, max-age=31536000, immutable';
+
+  await new Promise((resolve, reject) => {
+    const uploadStream = bucket.openUploadStream(gridName, {
+      contentType: ct,
+      metadata: {
+        bucketType,
+        key: safeKey,
+        contentType: ct,
+        cacheControl: cc,
+      },
+    });
+    uploadStream.on('error', reject);
+    uploadStream.on('finish', resolve);
+    uploadStream.end(buffer);
+  });
+
+  return true;
+}
+
 async function putObject({ bucketType = 'audio', key, body, contentType, cacheControl }) {
   const safeKey = path.basename(String(key || ''));
   if (!safeKey || !body) {
@@ -98,6 +191,7 @@ async function putObject({ bucketType = 'audio', key, body, contentType, cacheCo
     try {
       fs.mkdirSync(path.dirname(targetPath), { recursive: true });
       fs.writeFileSync(targetPath, body);
+      break;
     } catch (_) {}
   }
 
@@ -119,6 +213,24 @@ async function putObject({ bucketType = 'audio', key, body, contentType, cacheCo
     };
   }
 
+  if (isMongoStorageConfigured()) {
+    const uploaded = await putGridFSObject({
+      gridName: `${bucketType}/${safeKey}`,
+      body,
+      contentType,
+      cacheControl,
+      bucketType,
+      safeKey,
+    });
+    if (uploaded) {
+      return {
+        provider: 'mongodb',
+        key: safeKey,
+        url: getPublicUrl({ bucketType, key: safeKey }),
+      };
+    }
+  }
+
   return {
     provider: 'local',
     key: safeKey,
@@ -136,6 +248,20 @@ async function objectExists({ bucketType = 'audio', key }) {
         return true;
       }
     } catch (_) {}
+  }
+
+  if (isMongoStorageConfigured()) {
+    try {
+      const bucket = getGridFSBucket();
+      if (!bucket) return false;
+      const files = await bucket
+        .find({ filename: `${bucketType}/${safeKey}` }, { limit: 1 })
+        .toArray();
+      return files.length > 0 && Number(files[0].length) > 0;
+    } catch (err) {
+      console.warn(`[Storage] GridFS exists warning for ${safeKey}:`, err.message);
+      return false;
+    }
   }
 
   const client = getS3Client();
@@ -159,9 +285,78 @@ async function objectExists({ bucketType = 'audio', key }) {
   }
 }
 
+async function getGridFSObjectStream({ bucketType, safeKey, range }) {
+  const bucket = getGridFSBucket();
+  if (!bucket) return null;
+
+  const files = await bucket
+    .find({ filename: `${bucketType}/${safeKey}` })
+    .sort({ uploadDate: -1 })
+    .limit(1)
+    .toArray();
+
+  if (!files.length || !Number(files[0].length)) {
+    return null;
+  }
+
+  const file = files[0];
+  const totalSize = Number(file.length);
+  const ct = file.contentType || file.metadata?.contentType || 'application/octet-stream';
+  const cc = file.metadata?.cacheControl || 'public, max-age=31536000, immutable';
+
+  if (range) {
+    const parsed = parseByteRange(range, totalSize);
+    if (parsed.invalid) {
+      return {
+        status: 416,
+        headers: {
+          'Accept-Ranges': 'bytes',
+          'Content-Range': `bytes */${totalSize}`,
+        },
+        stream: null,
+      };
+    }
+
+    const { start, end } = parsed;
+    const stream = bucket.openDownloadStream(file._id, { start, end: end + 1 });
+    return {
+      status: 206,
+      headers: {
+        'Accept-Ranges': 'bytes',
+        'Cache-Control': cc,
+        'Content-Range': `bytes ${start}-${end}/${totalSize}`,
+        'Content-Length': String(end - start + 1),
+        'Content-Type': ct,
+      },
+      stream,
+    };
+  }
+
+  const stream = bucket.openDownloadStream(file._id);
+  return {
+    status: 200,
+    headers: {
+      'Accept-Ranges': 'bytes',
+      'Cache-Control': cc,
+      'Content-Length': String(totalSize),
+      'Content-Type': ct,
+    },
+    stream,
+  };
+}
+
 async function getObjectStream({ bucketType = 'audio', key, range }) {
   const safeKey = path.basename(String(key || ''));
   if (!safeKey) return null;
+
+  if (isMongoStorageConfigured()) {
+    try {
+      return await getGridFSObjectStream({ bucketType, safeKey, range });
+    } catch (err) {
+      console.warn(`[Storage] GridFS stream warning for ${safeKey}:`, err.message);
+      return null;
+    }
+  }
 
   const client = getS3Client();
   if (!client) return null;
@@ -209,6 +404,7 @@ async function getObjectStream({ bucketType = 'audio', key, range }) {
 }
 
 const storageService = {
+  isMongoStorageConfigured,
   isS3Configured,
   putObject,
   objectExists,
