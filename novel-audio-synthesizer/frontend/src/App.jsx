@@ -274,7 +274,7 @@ function AppContent() {
     }
     const params = new URLSearchParams(location.search);
     const modal = params.get('modal');
-    if (modal === 'auth' || params.has('auth')) {
+    if (modal === 'auth' || (params.has('auth') && params.get('auth') !== 'success')) {
       setAuthMode(params.get('auth') === 'register' ? 'register' : 'login');
       setShowAuthModal(true);
     } else if (modal === 'add-novel') {

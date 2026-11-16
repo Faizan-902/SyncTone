@@ -100,16 +100,28 @@ export default function SidebarNav({
         </button>
 
         {isAuthenticated ? (
-          <button
-            onClick={logout}
-            className="flex flex-col items-center gap-1 py-1 px-3 text-[10px] font-mono uppercase tracking-wider text-[var(--text-sub)] hover:text-[var(--text-main)] transition-all duration-100 ease-out active:scale-95 cursor-pointer"
-            aria-label="Sign Out"
-          >
-            <span className="w-5 h-5 rounded-full bg-[var(--accent)] text-[var(--on-accent)] text-[9px] font-mono flex items-center justify-center font-bold shadow-xs">
-              {user?.username?.[0] || 'U'}
-            </span>
-            <span>Sign Out</span>
-          </button>
+          <>
+            <button
+              onClick={() => onNavigate('profile')}
+              className={`flex flex-col items-center gap-1 py-1 px-3 text-[10px] font-mono uppercase tracking-wider transition-all duration-100 ease-out active:scale-95 cursor-pointer ${
+                currentView === 'profile' ? 'text-[var(--text-main)] font-bold' : 'text-[var(--text-sub)]'
+              }`}
+              aria-label="Profile & Passkeys"
+            >
+              <span className="w-5 h-5 rounded-full bg-[var(--accent)] text-[var(--on-accent)] text-[9px] font-mono flex items-center justify-center font-bold shadow-xs">
+                {user?.username?.[0]?.toUpperCase() || 'U'}
+              </span>
+              <span>Profile</span>
+            </button>
+            <button
+              onClick={logout}
+              className="flex flex-col items-center gap-1 py-1 px-3 text-[10px] font-mono uppercase tracking-wider text-[var(--text-sub)] hover:text-[var(--text-main)] transition-all duration-100 ease-out active:scale-95 cursor-pointer"
+              aria-label="Sign Out"
+            >
+              <Icon name="user" className="w-4 h-4" />
+              <span>Sign Out</span>
+            </button>
+          </>
         ) : (
           <button
             onClick={() => onOpenAuth('login')}

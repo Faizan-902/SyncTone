@@ -117,6 +117,20 @@ export default function TopHeader({
             >
               + UPLOAD STUDIO
             </button>
+            {isAuthenticated && (
+              <button
+                onClick={() => onNavigate?.('profile')}
+                aria-current={view === 'profile' ? 'page' : undefined}
+                className={`transition-all duration-200 px-2.5 lg:px-3 py-1 rounded-full cursor-pointer uppercase shrink-0 ${
+                  view === 'profile'
+                    ? 'bg-[var(--accent)] text-[var(--on-accent)] font-bold shadow-xs'
+                    : 'text-[var(--text-sub)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)]'
+                }`}
+                title="Profile & Passkeys"
+              >
+                + PROFILE
+              </button>
+            )}
           </nav>
         </div>
 
@@ -170,10 +184,21 @@ export default function TopHeader({
           {/* User Session / Auth Trigger */}
           {isAuthenticated ? (
             <div className="flex items-center gap-2 pl-2 border-l border-[var(--border-subtle)]">
-              <span className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-0.5 text-[10px] font-mono uppercase bg-[var(--bg-card)] border border-[var(--border-subtle)] text-[var(--text-sub)] rounded-full">
-                <IconShield className="w-3 h-3 text-[var(--text-main)]" />
-                {role}
-              </span>
+              <button
+                type="button"
+                onClick={() => onNavigate?.('profile')}
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-[10px] font-mono uppercase rounded-full border transition-all cursor-pointer active:scale-95 ${
+                  view === 'profile'
+                    ? 'bg-[var(--accent)] text-[var(--on-accent)] border-[var(--accent)] font-bold'
+                    : 'bg-[var(--bg-card)] text-[var(--text-main)] border-[var(--border-strong)] hover:border-[var(--text-main)]'
+                }`}
+                title="Open Profile & Passkey Settings"
+                aria-label="Profile and Passkeys"
+              >
+                <IconShield className="w-3 h-3 shrink-0" />
+                <span className="truncate max-w-[90px]">{user?.username || role}</span>
+                <span className="hidden md:inline opacity-70">• PASSKEYS</span>
+              </button>
               <button
                 onClick={logout}
                 className="boxed-btn px-3 py-1 text-[11px] font-mono uppercase text-[var(--text-sub)] hover:text-[var(--text-main)] bg-[var(--bg-card)] border-[var(--border-strong)] hover:border-[var(--text-main)] active:scale-95 cursor-pointer rounded-full transition-all"

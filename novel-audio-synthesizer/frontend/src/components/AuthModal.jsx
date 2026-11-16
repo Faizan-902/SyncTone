@@ -43,11 +43,18 @@ export default function AuthModal({ isOpen, onClose, initialMode = 'login' }) {
     loginWithPasskey,
     registerWithPasskey,
     loginWithOAuth,
+    loginWithGithub,
     error,
     clearError,
   } = useAuth();
 
   const [mode, setMode] = useState(initialMode); // 'login' | 'register'
+  const [usePasskeySignup, setUsePasskeySignup] = useState(false);
+  const [githubPanelOpen, setGithubPanelOpen] = useState(false);
+  const [githubUsername, setGithubUsername] = useState('');
+  const [githubToken, setGithubToken] = useState('');
+  const [showGithubTokenInput, setShowGithubTokenInput] = useState(false);
+
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -59,6 +66,8 @@ export default function AuthModal({ isOpen, onClose, initialMode = 'login' }) {
 
   const modalRef = useRef(null);
   const emailInputRef = useRef(null);
+  const usernameInputRef = useRef(null);
+  const githubInputRef = useRef(null);
   const triggerRef = useRef(null);
   const prefersReduced = useReducedMotion();
 
@@ -73,6 +82,11 @@ export default function AuthModal({ isOpen, onClose, initialMode = 'login' }) {
     setShowPassword(false);
     setUsername('');
     setRole('reader');
+    setUsePasskeySignup(false);
+    setGithubPanelOpen(false);
+    setGithubUsername('');
+    setGithubToken('');
+    setShowGithubTokenInput(false);
     setValidationError('');
     clearError?.();
     onClose();
@@ -89,19 +103,27 @@ export default function AuthModal({ isOpen, onClose, initialMode = 'login' }) {
 
   useEffect(() => {
     setMode(initialMode);
+    setUsePasskeySignup(false);
+    setGithubPanelOpen(false);
   }, [initialMode]);
 
   useEffect(() => {
     if (isOpen) {
       clearError?.();
       setValidationError('');
-      setTimeout(() => emailInputRef.current?.focus(), 50);
+      setTimeout(() => {
+        if (githubPanelOpen) githubInputRef.current?.focus();
+        else if (usePasskeySignup && mode === 'register') usernameInputRef.current?.focus();
+        else emailInputRef.current?.focus();
+      }, 50);
     } else {
       setPassword('');
       setShowPassword(false);
+      setUsePasskeySignup(false);
+      setGithubPanelOpen(false);
       setValidationError('');
     }
-  }, [isOpen, mode, clearError]);
+  }, [isOpen, mode, usePasskeySignup, githubPanelOpen, clearError]);
 
   useEffect(() => {
     function handleKeyDown(e) {
@@ -115,10 +137,47 @@ export default function AuthModal({ isOpen, onClose, initialMode = 'login' }) {
 
   if (!isOpen) return null;
 
+  const runPasskeyCreation = async () => {
+    const trimmedEmail = email.trim().toLowerCase();
+    const trimmedUser = username.trim();
+
+    if (trimmedEmail && !trimmedEmail.includes('@')) {
+      setValidationError('Please enter a valid email address.');
+      return;
+    }
+    if (!trimmedEmail && trimmedUser.length < 3) {
+      setValidationError('Enter a username (min 3 characters) or email address to create your Passkey.');
+      return;
+    }
+    if (trimmedUser && (trimmedUser.length < 3 || trimmedUser.length > 50)) {
+      setValidationError('Username must be between 3 and 50 characters.');
+      return;
+    }
+
+    setPasskeyBusy(true);
+    try {
+      const res = await registerWithPasskey?.({
+        email: trimmedEmail || undefined,
+        username: trimmedUser || undefined,
+        role,
+      });
+      if (res?.success) {
+        handleClose();
+      }
+    } finally {
+      setPasskeyBusy(false);
+    }
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setValidationError('');
     clearError?.();
+
+    if (mode === 'register' && usePasskeySignup) {
+      await runPasskeyCreation();
+      return;
+    }
 
     const trimmedEmail = email.trim().toLowerCase();
     if (!trimmedEmail || !trimmedEmail.includes('@')) {
@@ -162,33 +221,54 @@ export default function AuthModal({ isOpen, onClose, initialMode = 'login' }) {
     clearError?.();
 
     if (mode === 'register') {
-      const trimmedEmail = email.trim().toLowerCase();
-      if (!trimmedEmail || !trimmedEmail.includes('@')) {
-        setValidationError('Please enter your email address first to register a Passkey.');
+      if (!usePasskeySignup && !username.trim() && !email.trim()) {
+        setUsePasskeySignup(true);
+        setTimeout(() => usernameInputRef.current?.focus(), 40);
         return;
       }
-      const trimmedUser = username.trim();
-      if (trimmedUser && (trimmedUser.length < 3 || trimmedUser.length > 50)) {
-        setValidationError('Username must be between 3 and 50 characters.');
-        return;
-      }
+      setUsePasskeySignup(true);
+      await runPasskeyCreation();
+      return;
     }
 
     setPasskeyBusy(true);
     try {
-      const res =
-        mode === 'login'
-          ? await loginWithPasskey?.(email.trim().toLowerCase())
-          : await registerWithPasskey?.({
-              email: email.trim().toLowerCase(),
-              username: username.trim(),
-              role,
-            });
+      const res = await loginWithPasskey?.(email.trim().toLowerCase());
       if (res?.success) {
         handleClose();
       }
     } finally {
       setPasskeyBusy(false);
+    }
+  };
+
+  const handleGitHubClick = async () => {
+    setValidationError('');
+    clearError?.();
+    const res = await loginWithOAuth?.('github');
+    if (res?.needsGithubHandle) {
+      setGithubPanelOpen(true);
+    }
+  };
+
+  const handleGitHubSubmit = async (e) => {
+    e.preventDefault();
+    setValidationError('');
+    clearError?.();
+    const trimmedHandle = githubUsername.trim();
+    const trimmedToken = githubToken.trim();
+    if (!trimmedHandle && !trimmedToken) {
+      setValidationError('Enter your GitHub username (e.g. octocat) to continue.');
+      return;
+    }
+    setIsSubmitting(true);
+    try {
+      const res = await loginWithGithub?.({ username: trimmedHandle, token: trimmedToken });
+      if (res?.success) {
+        handleClose();
+      }
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -248,165 +328,274 @@ export default function AuthModal({ isOpen, onClose, initialMode = 'login' }) {
               {/* Title & Subheading */}
               <div className="mb-4">
                 <h2 id="auth-modal-title" className="text-2xl font-bold theme-heading font-serif">
-                  {mode === 'login' ? 'Welcome Back' : 'Join SyncTone'}
+                  {githubPanelOpen
+                    ? 'Continue with GitHub'
+                    : mode === 'login'
+                      ? 'Welcome Back'
+                      : 'Join SyncTone'}
                 </h2>
                 <p className="text-xs theme-sub mt-1 leading-relaxed">
-                  {mode === 'login'
-                    ? 'Sign in to access your saved audio library and synced progress.'
-                    : 'Create an account to start listening and assigning character voices.'}
+                  {githubPanelOpen
+                    ? 'Verify your GitHub handle to sync your profile and avatar.'
+                    : mode === 'login'
+                      ? 'Sign in to access your saved audio library and synced progress.'
+                      : 'Create an account to start listening and assigning character voices.'}
                 </p>
               </div>
 
-              {/* Quick Social + Passkey Options */}
-              <div className="space-y-2 mb-4">
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => loginWithOAuth?.('google')}
-                    className="flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl theme-card border border-[var(--border-strong)] hover:bg-[var(--bg-hover)] text-xs font-semibold theme-heading transition cursor-pointer disabled:opacity-50"
-                  >
-                    <GoogleLogo className="w-4 h-4 shrink-0" />
-                    <span>Google</span>
-                  </button>
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => loginWithOAuth?.('github')}
-                    className="flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl theme-card border border-[var(--border-strong)] hover:bg-[var(--bg-hover)] text-xs font-semibold theme-heading transition cursor-pointer disabled:opacity-50"
-                  >
-                    <GitHubLogo className="w-4 h-4 shrink-0" />
-                    <span>GitHub</span>
-                  </button>
-                </div>
+              {githubPanelOpen ? (
+                <>
+                  {displayError && (
+                    <div className="mb-3 p-3 rounded-xl bg-[var(--danger)]/10 border border-[var(--danger)]/20 text-[var(--danger)] text-xs font-semibold">
+                      {displayError}
+                    </div>
+                  )}
 
-                {webAuthnReady && (
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={handlePasskeyAction}
-                    className="w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl theme-card border border-[var(--border-strong)] hover:border-[var(--text-main)] hover:bg-[var(--bg-hover)] text-xs font-semibold theme-heading transition cursor-pointer disabled:opacity-50"
-                  >
-                    <IconShield className="w-4 h-4 text-[var(--accent-text)] shrink-0" />
-                    <span>
-                      {passkeyBusy
-                        ? 'Waiting for Passkey...'
-                        : mode === 'login'
-                          ? 'Sign In with Passkey'
-                          : 'Create Account with Passkey'}
-                    </span>
-                  </button>
-                )}
+                  <form onSubmit={handleGitHubSubmit} className="space-y-3.5">
+                    <div>
+                      <label htmlFor="auth-github-username" className="block text-xs font-semibold theme-sub mb-1">
+                        GitHub Username or Profile URL
+                      </label>
+                      <input
+                        ref={githubInputRef}
+                        id="auth-github-username"
+                        type="text"
+                        value={githubUsername}
+                        onChange={(e) => setGithubUsername(e.target.value)}
+                        placeholder="e.g. NamahOmprakash"
+                        disabled={busy}
+                        className="w-full px-3.5 py-2.5 theme-card border rounded-xl text-xs placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--border-focus)] transition"
+                      />
+                    </div>
 
-                <div className="flex items-center gap-3 pt-1">
-                  <div className="h-px flex-1 bg-[var(--border-subtle)]" />
-                  <span className="text-[10px] font-mono uppercase tracking-wider theme-muted">
-                    or continue with email
-                  </span>
-                  <div className="h-px flex-1 bg-[var(--border-subtle)]" />
-                </div>
-              </div>
+                    <div>
+                      <button
+                        type="button"
+                        onClick={() => setShowGithubTokenInput((p) => !p)}
+                        className="text-[11px] font-mono theme-muted hover:text-[var(--text-main)] underline cursor-pointer"
+                      >
+                        {showGithubTokenInput ? 'Hide Personal Access Token' : 'Optional: verify via GitHub Personal Access Token'}
+                      </button>
+                      {showGithubTokenInput && (
+                        <input
+                          type="password"
+                          value={githubToken}
+                          onChange={(e) => setGithubToken(e.target.value)}
+                          placeholder="ghp_... (optional read:user token)"
+                          disabled={busy}
+                          className="mt-2 w-full px-3.5 py-2.5 theme-card border rounded-xl text-xs placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--border-focus)] transition"
+                        />
+                      )}
+                    </div>
 
-              {/* Error Message Box */}
-              {displayError && (
-                <div className="mb-3 p-3 rounded-xl bg-[var(--danger)]/10 border border-[var(--danger)]/20 text-[var(--danger)] text-xs font-semibold">
-                  {displayError}
-                </div>
-              )}
-
-              {/* Email/Password Authentication Form */}
-              <form noValidate onSubmit={handleSubmit} className="space-y-3.5">
-                {mode === 'register' && (
-                  <div>
-                    <label htmlFor="auth-username" className="block text-xs font-semibold theme-sub mb-1">
-                      Username
-                    </label>
-                    <input
-                      id="auth-username"
-                      type="text"
-                      value={username}
-                      onChange={(e) => setUsername(e.target.value)}
-                      placeholder="e.g. synctone_reader"
-                      autoComplete="username"
+                    <button
+                      type="submit"
                       disabled={busy}
-                      className="w-full px-3.5 py-2.5 theme-card border rounded-xl text-xs placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--border-focus)] transition"
-                    />
-                  </div>
-                )}
+                      className="w-full py-3 px-6 bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-[var(--on-accent)] font-bold rounded-full shadow-md text-xs transition-all duration-200 hover:scale-[1.02] min-h-[44px] cursor-pointer disabled:opacity-50"
+                    >
+                      {isSubmitting ? 'Verifying GitHub Profile...' : 'Continue with GitHub'}
+                    </button>
 
-                <div>
-                  <label htmlFor="auth-email" className="block text-xs font-semibold theme-sub mb-1">
-                    Email address
-                  </label>
-                  <input
-                    ref={emailInputRef}
-                    id="auth-email"
-                    type="email"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    placeholder="you@example.com"
-                    autoComplete="email"
-                    disabled={busy}
-                    className="w-full px-3.5 py-2.5 theme-card border rounded-xl text-xs placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--border-focus)] transition"
-                  />
-                </div>
-
-                <div>
-                  <label htmlFor="auth-password" className="block text-xs font-semibold theme-sub mb-1">
-                    Password
-                  </label>
-                  <div className="relative">
-                    <input
-                      id="auth-password"
-                      type={showPassword ? 'text' : 'password'}
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      placeholder="••••••••"
-                      autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
-                      disabled={busy}
-                      className="w-full pl-3.5 pr-14 py-2.5 theme-card border rounded-xl text-xs placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--border-focus)] transition"
-                    />
                     <button
                       type="button"
-                      onClick={() => setShowPassword((prev) => !prev)}
-                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] font-mono theme-muted hover:text-[var(--text-main)] px-1.5 py-0.5 rounded cursor-pointer"
-                      aria-label={showPassword ? 'Hide password' : 'Show password'}
+                      onClick={() => {
+                        setGithubPanelOpen(false);
+                        setValidationError('');
+                        clearError?.();
+                      }}
+                      className="w-full py-2 text-xs theme-muted hover:text-[var(--text-main)] font-mono cursor-pointer"
                     >
-                      {showPassword ? 'Hide' : 'Show'}
+                      ← Back to all sign-in options
                     </button>
-                  </div>
-                </div>
+                  </form>
+                </>
+              ) : (
+                <>
+                  {/* Quick Social + Passkey Options */}
+                  <div className="space-y-2 mb-4">
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => loginWithOAuth?.('google')}
+                        className="flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl theme-card border border-[var(--border-strong)] hover:bg-[var(--bg-hover)] text-xs font-semibold theme-heading transition cursor-pointer disabled:opacity-50"
+                      >
+                        <GoogleLogo className="w-4 h-4 shrink-0" />
+                        <span>Google</span>
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={handleGitHubClick}
+                        className="flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl theme-card border border-[var(--border-strong)] hover:bg-[var(--bg-hover)] text-xs font-semibold theme-heading transition cursor-pointer disabled:opacity-50"
+                      >
+                        <GitHubLogo className="w-4 h-4 shrink-0" />
+                        <span>GitHub</span>
+                      </button>
+                    </div>
 
-                {mode === 'register' && (
-                  <div>
-                    <label htmlFor="auth-role" className="block text-xs font-semibold theme-sub mb-1">
-                      Account Type
-                    </label>
-                    <select
-                      id="auth-role"
-                      value={role}
-                      onChange={(e) => setRole(e.target.value)}
+                    {webAuthnReady && (
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={handlePasskeyAction}
+                        className={`w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl border text-xs font-semibold transition cursor-pointer disabled:opacity-50 ${
+                          mode === 'register' && usePasskeySignup
+                            ? 'bg-[var(--accent-surface)] border-[var(--text-main)] theme-heading ring-1 ring-[var(--text-main)]'
+                            : 'theme-card border-[var(--border-strong)] hover:border-[var(--text-main)] hover:bg-[var(--bg-hover)] theme-heading'
+                        }`}
+                      >
+                        <IconShield className="w-4 h-4 text-[var(--accent-text)] shrink-0" />
+                        <span>
+                          {passkeyBusy
+                            ? 'Waiting for Biometric / Security Key...'
+                            : mode === 'login'
+                              ? 'Sign In with Passkey'
+                              : usePasskeySignup
+                                ? 'Passkey Signup Selected (No Password Needed)'
+                                : 'Create Account with Passkey'}
+                        </span>
+                      </button>
+                    )}
+
+                    <div className="flex items-center gap-3 pt-1">
+                      <div className="h-px flex-1 bg-[var(--border-subtle)]" />
+                      <span className="text-[10px] font-mono uppercase tracking-wider theme-muted">
+                        {mode === 'register' && usePasskeySignup
+                          ? 'passkey account details'
+                          : 'or continue with email'}
+                      </span>
+                      <div className="h-px flex-1 bg-[var(--border-subtle)]" />
+                    </div>
+                  </div>
+
+                  {mode === 'register' && usePasskeySignup && (
+                    <div className="mb-3 p-3 rounded-xl bg-[var(--accent-surface)] border border-[var(--border-strong)] text-xs theme-heading space-y-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-bold">Passwordless Passkey Setup</span>
+                        <button
+                          type="button"
+                          onClick={() => setUsePasskeySignup(false)}
+                          className="text-[10px] font-mono underline theme-muted hover:text-[var(--text-main)] cursor-pointer"
+                        >
+                          Use password instead
+                        </button>
+                      </div>
+                      <p className="text-[11px] theme-sub">
+                        Enter a username (and optional email), then click the button below to confirm with Touch ID, Face ID, or Windows Hello.
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Error Message Box */}
+                  {displayError && (
+                    <div className="mb-3 p-3 rounded-xl bg-[var(--danger)]/10 border border-[var(--danger)]/20 text-[var(--danger)] text-xs font-semibold">
+                      {displayError}
+                    </div>
+                  )}
+
+                  {/* Email/Password OR Passkey Registration Form */}
+                  <form noValidate onSubmit={handleSubmit} className="space-y-3.5">
+                    {mode === 'register' && (
+                      <div>
+                        <label htmlFor="auth-username" className="block text-xs font-semibold theme-sub mb-1">
+                          Username
+                        </label>
+                        <input
+                          ref={usernameInputRef}
+                          id="auth-username"
+                          type="text"
+                          value={username}
+                          onChange={(e) => setUsername(e.target.value)}
+                          placeholder="e.g. synctone_reader"
+                          autoComplete="username"
+                          disabled={busy}
+                          className="w-full px-3.5 py-2.5 theme-card border rounded-xl text-xs placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--border-focus)] transition"
+                        />
+                      </div>
+                    )}
+
+                    <div>
+                      <label htmlFor="auth-email" className="block text-xs font-semibold theme-sub mb-1">
+                        {mode === 'register' && usePasskeySignup
+                          ? 'Email address (optional for Passkey)'
+                          : 'Email address'}
+                      </label>
+                      <input
+                        ref={emailInputRef}
+                        id="auth-email"
+                        type="email"
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                        placeholder="you@example.com"
+                        autoComplete="email"
+                        disabled={busy}
+                        className="w-full px-3.5 py-2.5 theme-card border rounded-xl text-xs placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--border-focus)] transition"
+                      />
+                    </div>
+
+                    {!(mode === 'register' && usePasskeySignup) && (
+                      <div>
+                        <label htmlFor="auth-password" className="block text-xs font-semibold theme-sub mb-1">
+                          Password
+                        </label>
+                        <div className="relative">
+                          <input
+                            id="auth-password"
+                            type={showPassword ? 'text' : 'password'}
+                            value={password}
+                            onChange={(e) => setPassword(e.target.value)}
+                            placeholder="••••••••"
+                            autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
+                            disabled={busy}
+                            className="w-full pl-3.5 pr-14 py-2.5 theme-card border rounded-xl text-xs placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--border-focus)] transition"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowPassword((prev) => !prev)}
+                            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] font-mono theme-muted hover:text-[var(--text-main)] px-1.5 py-0.5 rounded cursor-pointer"
+                            aria-label={showPassword ? 'Hide password' : 'Show password'}
+                          >
+                            {showPassword ? 'Hide' : 'Show'}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {mode === 'register' && (
+                      <div>
+                        <label htmlFor="auth-role" className="block text-xs font-semibold theme-sub mb-1">
+                          Account Type
+                        </label>
+                        <select
+                          id="auth-role"
+                          value={role}
+                          onChange={(e) => setRole(e.target.value)}
+                          disabled={busy}
+                          className="w-full px-3.5 py-2.5 theme-card border rounded-xl text-xs focus:outline-none focus:border-[var(--border-focus)] transition"
+                        >
+                          <option value="reader">Reader (Listen &amp; Read only)</option>
+                          <option value="writer">Writer (Upload Novels &amp; Manage Cast)</option>
+                        </select>
+                      </div>
+                    )}
+
+                    <button
+                      type="submit"
                       disabled={busy}
-                      className="w-full px-3.5 py-2.5 theme-card border rounded-xl text-xs focus:outline-none focus:border-[var(--border-focus)] transition"
+                      className="w-full py-3 px-6 bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-[var(--on-accent)] font-bold rounded-full shadow-md text-xs transition-all duration-200 hover:scale-[1.02] hover:-translate-y-0.5 active:scale-[0.96] min-h-[44px] cursor-pointer disabled:opacity-50 select-none"
                     >
-                      <option value="reader">Reader (Listen &amp; Read only)</option>
-                      <option value="writer">Writer (Upload Novels &amp; Manage Cast)</option>
-                    </select>
-                  </div>
-                )}
-
-                <button
-                  type="submit"
-                  disabled={busy}
-                  className="w-full py-3 px-6 bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-[var(--on-accent)] font-bold rounded-full shadow-md text-xs transition-all duration-200 hover:scale-[1.02] hover:-translate-y-0.5 active:scale-[0.96] min-h-[44px] cursor-pointer disabled:opacity-50 select-none"
-                >
-                  {isSubmitting
-                    ? 'Connecting...'
-                    : mode === 'login'
-                      ? 'Sign In to SyncTone'
-                      : 'Join as ' + (role === 'writer' ? 'Writer' : 'Reader')}
-                </button>
-              </form>
+                      {busy
+                        ? 'Connecting...'
+                        : mode === 'login'
+                          ? 'Sign In to SyncTone'
+                          : usePasskeySignup
+                            ? 'Continue with Passkey'
+                            : 'Join as ' + (role === 'writer' ? 'Writer' : 'Reader')}
+                    </button>
+                  </form>
+                </>
+              )}
             </div>
 
             {/* Mode Switcher Footer */}
@@ -416,7 +605,11 @@ export default function AuthModal({ isOpen, onClose, initialMode = 'login' }) {
                   New to SyncTone?{' '}
                   <button
                     type="button"
-                    onClick={() => setMode('register')}
+                    onClick={() => {
+                      setGithubPanelOpen(false);
+                      setUsePasskeySignup(false);
+                      setMode('register');
+                    }}
                     className="text-[var(--accent-text)] hover:underline font-bold cursor-pointer"
                   >
                     Create Account
@@ -427,7 +620,11 @@ export default function AuthModal({ isOpen, onClose, initialMode = 'login' }) {
                   Already have an account?{' '}
                   <button
                     type="button"
-                    onClick={() => setMode('login')}
+                    onClick={() => {
+                      setGithubPanelOpen(false);
+                      setUsePasskeySignup(false);
+                      setMode('login');
+                    }}
                     className="text-[var(--accent-text)] hover:underline font-bold cursor-pointer"
                   >
                     Sign In

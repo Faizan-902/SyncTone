@@ -165,6 +165,8 @@ export const api = {
       api.get('/auth/providers'),
     oauthNeonSession: (token, provider = 'google') =>
       api.post('/auth/oauth/neon-session', { token, provider }),
+    oauthGithubVerify: ({ username, token }) =>
+      api.post('/auth/oauth/github/verify', { username, token }),
     passkey: {
       registerOptions: (payload = {}) => api.post('/auth/passkey/register-options', payload),
       registerVerify: (payload) => api.post('/auth/passkey/register-verify', payload),

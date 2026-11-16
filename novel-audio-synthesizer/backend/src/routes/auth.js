@@ -406,16 +406,39 @@ router.post('/auth/passkey/register-options', optionalAuth, async (req, res) => 
         transports: Array.isArray(pk.transports) && pk.transports.length > 0 ? pk.transports : undefined,
       }));
     } else {
-      if (!email || typeof email !== 'string' || !email.includes('@')) {
+      let rawEmail = typeof email === 'string' ? email.toLowerCase().trim() : '';
+      const rawUsername = typeof username === 'string' ? username.trim() : '';
+
+      if (!rawEmail && (!rawUsername || rawUsername.length < 3)) {
+        return res.status(400).json({
+          error: 'Please enter a username (at least 3 characters) or email address to create a Passkey.',
+        });
+      }
+
+      if (!rawEmail) {
+        const slug = rawUsername.toLowerCase().replace(/[^a-z0-9._-]+/g, '.').replace(/^\.+|\.+$/g, '') || 'user';
+        rawEmail = `${slug}@passkey.synctone.local`;
+      }
+
+      if (!rawEmail.includes('@')) {
         return res.status(400).json({ error: 'A valid email address is required to register a passkey.' });
       }
-      targetEmail = email.toLowerCase().trim();
+      targetEmail = rawEmail;
 
       const existingEmail = await pool.query('SELECT id FROM users WHERE LOWER(email) = $1 LIMIT 1', [targetEmail]);
       if (existingEmail.rows.length > 0) {
         return res.status(409).json({
           error: 'An account with this email already exists. Please sign in first, then add a passkey from your Profile.',
         });
+      }
+
+      if (rawUsername && rawUsername.length >= 3) {
+        const existingName = await pool.query('SELECT id FROM users WHERE LOWER(username) = LOWER($1) LIMIT 1', [rawUsername]);
+        if (existingName.rows.length > 0) {
+          return res.status(409).json({
+            error: 'That username is already taken. Sign in to add a passkey in Profile, or choose another username.',
+          });
+        }
       }
 
       normalizedRole = String(role || 'reader').toLowerCase().trim();
@@ -428,8 +451,8 @@ router.post('/auth/passkey/register-options', optionalAuth, async (req, res) => 
       }
 
       targetUsername =
-        typeof username === 'string' && username.trim().length >= 3
-          ? username.trim().slice(0, 50)
+        rawUsername.length >= 3
+          ? rawUsername.slice(0, 50)
           : await generateUniqueUsername(targetEmail.split('@')[0], targetEmail);
 
       targetUserId = crypto.randomUUID();
@@ -755,9 +778,16 @@ router.delete('/auth/passkeys/:id', authenticateUser, async (req, res) => {
   }
 });
 
+function resolveTrustedNeonOrigin(baseOrigin) {
+  if (/^https?:\/\/localhost(?::\d+)?$/i.test(baseOrigin)) {
+    return baseOrigin;
+  }
+  return 'https://synctone-five.vercel.app';
+}
+
 /**
  * GET /api/auth/oauth/:provider/start
- * Initiates OAuth 2.0 login flow for Google or GitHub.
+ * Initiates OAuth 2.0 login flow for Google or GitHub (direct or via server-side Neon Auth redirect).
  */
 router.get('/auth/oauth/:provider/start', async (req, res) => {
   const provider = String(req.params.provider || '').toLowerCase();
@@ -792,6 +822,60 @@ router.get('/auth/oauth/:provider/start', async (req, res) => {
       return res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`);
     }
 
+    // Server-side Neon Managed Auth Social OAuth flow (avoids browser CORS/403 & 3rd-party cookie blocks)
+    if (provider === 'google' && config.auth?.neonAuthBaseUrl) {
+      const trustedOrigin = resolveTrustedNeonOrigin(baseOrigin);
+      const neonCallbackUrl = `${trustedOrigin}/api/auth/oauth/neon/callback`;
+      const neonResp = await axios.post(
+        `${config.auth.neonAuthBaseUrl}/sign-in/social`,
+        {
+          provider: 'google',
+          callbackURL: neonCallbackUrl,
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            Origin: trustedOrigin,
+          },
+          timeout: 10000,
+        }
+      );
+
+      const oauthUrl = neonResp.data?.url;
+      if (!oauthUrl) {
+        return res.redirect(`${baseOrigin}/?auth_error=google_no_redirect_url`);
+      }
+
+      const rawSetCookies = Array.isArray(neonResp.headers['set-cookie'])
+        ? neonResp.headers['set-cookie']
+        : neonResp.headers['set-cookie']
+          ? [neonResp.headers['set-cookie']]
+          : [];
+      const challengeCookiePairs = rawSetCookies
+        .map((c) => String(c).split(';')[0].trim())
+        .filter(Boolean)
+        .join('; ');
+
+      const challengeId = crypto.randomUUID();
+      await pool.query(
+        `INSERT INTO auth_challenges (challenge_id, challenge, flow_type, metadata, expires_at)
+         VALUES ($1, $2, 'neon_oauth', $3::jsonb, $4)`,
+        [
+          challengeId,
+          challengeCookiePairs,
+          JSON.stringify({ returnOrigin: baseOrigin, trustedOrigin, returnTo }),
+          new Date(Date.now() + 10 * 60 * 1000),
+        ]
+      );
+
+      res.cookie('synctone_neon_challenge', challengeId, {
+        ...getCookieSettings(),
+        maxAge: 10 * 60 * 1000,
+      });
+
+      return res.redirect(oauthUrl);
+    }
+
     if (provider === 'github' && config.auth?.github?.clientId && config.auth?.github?.clientSecret) {
       await pool.query(
         `INSERT INTO auth_challenges (challenge_id, challenge, flow_type, metadata, expires_at)
@@ -811,6 +895,179 @@ router.get('/auth/oauth/:provider/start', async (req, res) => {
   } catch (err) {
     console.error(`[OAuth Start Error - ${provider}]:`, err.message);
     return res.redirect(`${baseOrigin}/?auth_error=${provider}_start_failed`);
+  }
+});
+
+/**
+ * GET /api/auth/oauth/neon/callback
+ * Exchanges Neon Auth verifier + stored session_challenge cookie server-side for verified Google user session.
+ */
+router.get('/auth/oauth/neon/callback', async (req, res) => {
+  const { baseOrigin } = resolveWebAuthnContext(req);
+  const verifier = req.query?.neon_auth_session_verifier;
+  const challengeId = req.cookies?.synctone_neon_challenge;
+
+  if (!config.auth?.neonAuthBaseUrl) {
+    return res.redirect(`${baseOrigin}/?auth_error=google_not_configured`);
+  }
+
+  let returnOrigin = baseOrigin;
+  let returnTo = '/';
+  let trustedOrigin = resolveTrustedNeonOrigin(baseOrigin);
+  let cookieHeader = '';
+
+  try {
+    await ensureAuthSchemaTables(pool);
+
+    if (challengeId) {
+      const chRes = await pool.query(
+        `DELETE FROM auth_challenges
+         WHERE challenge_id = $1 AND flow_type = 'neon_oauth' AND expires_at > now()
+         RETURNING *`,
+        [String(challengeId)]
+      );
+      if (chRes.rows.length > 0) {
+        cookieHeader = chRes.rows[0].challenge || '';
+        const meta = chRes.rows[0].metadata || {};
+        returnOrigin = meta.returnOrigin || baseOrigin;
+        returnTo = meta.returnTo || '/';
+        trustedOrigin = meta.trustedOrigin || trustedOrigin;
+      }
+    }
+
+    res.clearCookie('synctone_neon_challenge', getCookieSettings());
+
+    if (!verifier) {
+      return res.redirect(`${returnOrigin}/?auth_error=google_missing_verifier`);
+    }
+
+    const sessionResp = await axios.get(
+      `${config.auth.neonAuthBaseUrl}/get-session?neon_auth_session_verifier=${encodeURIComponent(String(verifier))}`,
+      {
+        headers: {
+          Origin: trustedOrigin,
+          ...(cookieHeader ? { Cookie: cookieHeader } : {}),
+          'x-neon-auth-middleware': 'true',
+        },
+        timeout: 10000,
+      }
+    );
+
+    let profileUser = sessionResp.data?.user || null;
+    if (!profileUser) {
+      const jwtHeader = sessionResp.headers['set-auth-jwt'];
+      if (jwtHeader) {
+        const claims = await verifyNeonAuthJwt(jwtHeader);
+        profileUser = {
+          id: claims.sub || claims.userId,
+          email: claims.email,
+          name: claims.name || claims.preferred_username,
+          image: claims.picture || claims.image,
+        };
+      }
+    }
+
+    if (!profileUser || !profileUser.email) {
+      return res.redirect(`${returnOrigin}/?auth_error=google_session_empty`);
+    }
+
+    const userRecord = await findOrCreateOAuthUser({
+      provider: 'google',
+      providerAccountId: profileUser.id || profileUser.email,
+      email: profileUser.email,
+      displayName: profileUser.name || profileUser.email.split('@')[0],
+      avatarUrl: profileUser.image || profileUser.picture || null,
+    });
+
+    issueSessionCookie(res, userRecord);
+    const sep = returnTo.includes('?') ? '&' : '?';
+    return res.redirect(`${returnOrigin}${returnTo}${sep}auth=success&provider=google`);
+  } catch (err) {
+    console.error('[Neon OAuth Callback Error]:', err.message);
+    return res.redirect(`${returnOrigin}/?auth_error=google_callback_failed`);
+  }
+});
+
+/**
+ * POST /api/auth/oauth/github/verify
+ * Verifies a GitHub account via Personal Access Token or GitHub username lookup against api.github.com.
+ */
+router.post('/auth/oauth/github/verify', async (req, res) => {
+  try {
+    await ensureAuthSchemaTables(pool);
+    const { username, token } = req.body || {};
+    let cleanHandle = String(username || '').trim();
+    if (cleanHandle.includes('github.com/')) {
+      cleanHandle = cleanHandle.split('github.com/')[1].split(/[/?#]/)[0];
+    }
+    cleanHandle = cleanHandle.replace(/^@+/, '').trim();
+
+    if (!token && (!cleanHandle || !/^[a-zA-Z0-9-]{1,39}$/.test(cleanHandle))) {
+      return res.status(400).json({ error: 'Please enter a valid GitHub username (e.g. octocat).' });
+    }
+
+    const baseHeaders = {
+      'User-Agent': 'SyncTone-Audio-Studio',
+      Accept: 'application/vnd.github+json',
+    };
+
+    let ghUser = null;
+    let resolvedEmail = '';
+
+    if (token && typeof token === 'string' && token.trim()) {
+      const authHeaders = { ...baseHeaders, Authorization: `Bearer ${token.trim()}` };
+      const [userResp, emailsResp] = await Promise.all([
+        axios.get('https://api.github.com/user', { headers: authHeaders, timeout: 8000 }),
+        axios.get('https://api.github.com/user/emails', { headers: authHeaders, timeout: 8000 }).catch(() => ({ data: [] })),
+      ]);
+      ghUser = userResp.data;
+      const primaryEmailObj =
+        (Array.isArray(emailsResp.data) && emailsResp.data.find((e) => e.primary && e.verified)) ||
+        (Array.isArray(emailsResp.data) && emailsResp.data.find((e) => e.verified)) ||
+        null;
+      resolvedEmail = primaryEmailObj?.email || ghUser?.email || '';
+    } else {
+      const userResp = await axios.get(`https://api.github.com/users/${encodeURIComponent(cleanHandle)}`, {
+        headers: baseHeaders,
+        timeout: 8000,
+      });
+      ghUser = userResp.data;
+      resolvedEmail = ghUser?.email || '';
+    }
+
+    if (!ghUser || !ghUser.id || !ghUser.login) {
+      return res.status(404).json({ error: 'GitHub account not found.' });
+    }
+
+    if (!resolvedEmail) {
+      resolvedEmail = `${String(ghUser.login).toLowerCase()}@users.noreply.github.com`;
+    }
+
+    const userRecord = await findOrCreateOAuthUser({
+      provider: 'github',
+      providerAccountId: ghUser.id,
+      email: resolvedEmail,
+      displayName: ghUser.login || ghUser.name,
+      avatarUrl: ghUser.avatar_url || null,
+    });
+
+    const session = issueSessionCookie(res, userRecord);
+    return res.json({
+      verified: true,
+      message: `Signed in as GitHub user ${ghUser.login}`,
+      token: session.token,
+      user: session.user,
+    });
+  } catch (err) {
+    const status = err.response?.status;
+    if (status === 404) {
+      return res.status(404).json({ error: 'GitHub username not found. Please check the spelling and try again.' });
+    }
+    if (status === 401) {
+      return res.status(401).json({ error: 'GitHub token is invalid or expired.' });
+    }
+    console.error('[GitHub Verify Error]:', err.message);
+    return res.status(502).json({ error: 'Could not verify GitHub account right now. Please try again.' });
   }
 });
 

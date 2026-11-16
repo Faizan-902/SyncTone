@@ -231,48 +231,49 @@ export function AuthProvider({ children }) {
     []
   );
 
+  const loginWithGithub = useCallback(async ({ username = '', token = '' } = {}) => {
+    setError(null);
+    try {
+      const res = await api.auth.oauthGithubVerify({ username, token });
+      if (res?.user) {
+        setUser(res.user);
+        return { success: true, user: res.user };
+      }
+      throw new Error('GitHub sign-in returned no user session.');
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : err.message || 'GitHub sign-in failed.';
+      setError(msg);
+      return { success: false, error: msg };
+    }
+  }, []);
+
   const loginWithOAuth = useCallback(
     async (provider) => {
       setError(null);
       const prov = String(provider || '').toLowerCase();
-      const activeProviders = await loadProviders();
+      const apiBase = (
+        (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_API_BASE_URL) ||
+        '/api'
+      ).replace(/\/$/, '');
 
-      if (prov === 'google' && activeProviders?.googleMode === 'neon_auth' && activeProviders?.neonAuthUrl) {
-        try {
-          const { createAuthClient } = await import('@neon/auth');
-          const neonClient = createAuthClient(activeProviders.neonAuthUrl);
-          const callbackURL = `${window.location.origin}/?neon_auth_callback=1`;
-          const res = await neonClient.signIn.social({
-            provider: 'google',
-            callbackURL,
-          });
-          if (res?.data?.url) {
-            window.location.assign(res.data.url);
-            return { success: true };
-          }
-          if (res?.error) {
-            throw new Error(res.error.message || 'Google sign-in could not start.');
-          }
-        } catch (err) {
-          const msg = err?.message || 'Google sign-in could not start.';
-          setError(msg);
-          return { success: false, error: msg };
-        }
-      }
-
-      if (
-        (prov === 'google' && activeProviders?.googleMode === 'oauth') ||
-        (prov === 'github' && activeProviders?.githubMode === 'oauth')
-      ) {
-        const apiBase = (
-          (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_API_BASE_URL) ||
-          '/api'
-        ).replace(/\/$/, '');
-        window.location.assign(`${apiBase}/auth/oauth/${prov}/start`);
+      // Google uses server-side redirect (/api/auth/oauth/google/start -> direct Google OR Neon Auth bridge)
+      // Avoiding cross-origin browser fetch eliminates CORS/403 & third-party cookie blocks.
+      if (prov === 'google') {
+        window.location.assign(`${apiBase}/auth/oauth/google/start`);
         return { success: true };
       }
 
-      const label = prov === 'github' ? 'GitHub' : 'Google';
+      const activeProviders = await loadProviders();
+      if (prov === 'github' && activeProviders?.githubMode === 'oauth') {
+        window.location.assign(`${apiBase}/auth/oauth/github/start`);
+        return { success: true };
+      }
+
+      if (prov === 'github') {
+        return { success: false, needsGithubHandle: true };
+      }
+
+      const label = prov.charAt(0).toUpperCase() + prov.slice(1);
       const msg = `${label} OAuth credentials are not configured yet on this deployment. Sign in with Passkey or Email/Password below.`;
       setError(msg);
       return { success: false, error: msg };
@@ -313,6 +314,7 @@ export function AuthProvider({ children }) {
       loginWithPasskey,
       registerWithPasskey,
       loginWithOAuth,
+      loginWithGithub,
       logout,
       clearError,
     }),
@@ -330,6 +332,7 @@ export function AuthProvider({ children }) {
       loginWithPasskey,
       registerWithPasskey,
       loginWithOAuth,
+      loginWithGithub,
       logout,
       clearError,
     ]
