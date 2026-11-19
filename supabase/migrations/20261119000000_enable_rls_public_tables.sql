@@ -1,5 +1,6 @@
 -- Enable Row-Level Security (RLS) on all tables in the public schema
--- Resolves Supabase Security Advisory: rls_disabled_in_public
+-- and enforce security_invoker = true on all views in the public schema.
+-- Resolves Supabase Security Advisories: rls_disabled_in_public & security_definer_view
 -- Direct PostgREST API access (anon / authenticated) is blocked by default when RLS is enabled without permissive policies,
 -- while table owners (postgres / neondb_owner) used by the Express backend bypass RLS automatically.
 
@@ -20,9 +21,15 @@ ALTER TABLE IF EXISTS public.oauth_accounts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS public.user_passkeys ENABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS public.auth_challenges ENABLE ROW LEVEL SECURITY;
 
+ALTER VIEW IF EXISTS public.v_synthesis_jobs SET (security_invoker = true);
+ALTER VIEW IF EXISTS public.v_character_aliases SET (security_invoker = true);
+ALTER VIEW IF EXISTS public.v_playback_history SET (security_invoker = true);
+ALTER VIEW IF EXISTS public.reading_progress SET (security_invoker = true);
+
 DO $$
 DECLARE
     tbl RECORD;
+    vw RECORD;
     has_anon BOOLEAN;
     has_authenticated BOOLEAN;
 BEGIN
@@ -40,6 +47,20 @@ BEGIN
         END IF;
         IF has_authenticated THEN
             EXECUTE format('REVOKE ALL ON TABLE public.%I FROM authenticated', tbl.tablename);
+        END IF;
+    END LOOP;
+
+    FOR vw IN
+        SELECT viewname
+        FROM pg_views
+        WHERE schemaname = 'public'
+    LOOP
+        EXECUTE format('ALTER VIEW public.%I SET (security_invoker = true)', vw.viewname);
+        IF has_anon THEN
+            EXECUTE format('REVOKE ALL ON TABLE public.%I FROM anon', vw.viewname);
+        END IF;
+        IF has_authenticated THEN
+            EXECUTE format('REVOKE ALL ON TABLE public.%I FROM authenticated', vw.viewname);
         END IF;
     END LOOP;
 END $$;

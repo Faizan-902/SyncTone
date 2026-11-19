@@ -507,7 +507,7 @@ FOR EACH ROW EXECUTE FUNCTION fn_check_character_novel_update();
 -- Projection Views
 -- ==============================================================================
 
-CREATE OR REPLACE VIEW v_synthesis_jobs AS
+CREATE OR REPLACE VIEW v_synthesis_jobs WITH (security_invoker = true) AS
 SELECT
   j.id,
   COALESCE(np.novel_id, c.novel_id) AS novel_id,
@@ -529,7 +529,7 @@ LEFT JOIN novel_profile_job_targets np ON j.id = np.job_id
 LEFT JOIN chapter_synthesis_job_targets cs ON j.id = cs.job_id
 LEFT JOIN chapters c ON cs.chapter_id = c.id;
 
-CREATE OR REPLACE VIEW v_character_aliases AS
+CREATE OR REPLACE VIEW v_character_aliases WITH (security_invoker = true) AS
 SELECT
   ca.id,
   c.novel_id,
@@ -538,7 +538,7 @@ SELECT
 FROM character_aliases ca
 JOIN characters c ON ca.character_id = c.id;
 
-CREATE OR REPLACE VIEW v_playback_history AS
+CREATE OR REPLACE VIEW v_playback_history WITH (security_invoker = true) AS
 SELECT
   h.id,
   h.user_id,
@@ -550,7 +550,7 @@ SELECT
 FROM playback_history h
 LEFT JOIN playback_positions p ON h.id = p.history_id;
 
-CREATE OR REPLACE VIEW reading_progress AS
+CREATE OR REPLACE VIEW reading_progress WITH (security_invoker = true) AS
 SELECT
   h.id,
   h.user_id,
@@ -710,9 +710,15 @@ ALTER TABLE IF EXISTS public.oauth_accounts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS public.user_passkeys ENABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS public.auth_challenges ENABLE ROW LEVEL SECURITY;
 
+ALTER VIEW IF EXISTS public.v_synthesis_jobs SET (security_invoker = true);
+ALTER VIEW IF EXISTS public.v_character_aliases SET (security_invoker = true);
+ALTER VIEW IF EXISTS public.v_playback_history SET (security_invoker = true);
+ALTER VIEW IF EXISTS public.reading_progress SET (security_invoker = true);
+
 DO $$
 DECLARE
     tbl RECORD;
+    vw RECORD;
     has_anon BOOLEAN;
     has_authenticated BOOLEAN;
 BEGIN
@@ -730,6 +736,20 @@ BEGIN
         END IF;
         IF has_authenticated THEN
             EXECUTE format('REVOKE ALL ON TABLE public.%I FROM authenticated', tbl.tablename);
+        END IF;
+    END LOOP;
+
+    FOR vw IN
+        SELECT viewname
+        FROM pg_views
+        WHERE schemaname = 'public'
+    LOOP
+        EXECUTE format('ALTER VIEW public.%I SET (security_invoker = true)', vw.viewname);
+        IF has_anon THEN
+            EXECUTE format('REVOKE ALL ON TABLE public.%I FROM anon', vw.viewname);
+        END IF;
+        IF has_authenticated THEN
+            EXECUTE format('REVOKE ALL ON TABLE public.%I FROM authenticated', vw.viewname);
         END IF;
     END LOOP;
 END $$;

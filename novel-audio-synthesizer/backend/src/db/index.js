@@ -77,6 +77,7 @@ const RLS_LOCKDOWN_SQL = `
 DO $$
 DECLARE
     tbl RECORD;
+    vw RECORD;
     has_anon BOOLEAN;
     has_authenticated BOOLEAN;
 BEGIN
@@ -96,13 +97,37 @@ BEGIN
             EXECUTE format('REVOKE ALL ON TABLE public.%I FROM authenticated', tbl.tablename);
         END IF;
     END LOOP;
+
+    FOR vw IN
+        SELECT viewname
+        FROM pg_views
+        WHERE schemaname = 'public'
+    LOOP
+        EXECUTE format('ALTER VIEW public.%I SET (security_invoker = true)', vw.viewname);
+        IF has_anon THEN
+            EXECUTE format('REVOKE ALL ON TABLE public.%I FROM anon', vw.viewname);
+        END IF;
+        IF has_authenticated THEN
+            EXECUTE format('REVOKE ALL ON TABLE public.%I FROM authenticated', vw.viewname);
+        END IF;
+    END LOOP;
 END $$;
 `;
 
 async function ensureAuthSchemaTables(pgPool = pool) {
   if (authSchemaEnsured) return false;
   const check = await pgPool.query(
-    "SELECT to_regclass('public.user_passkeys') AS pk_tbl, to_regclass('public.oauth_accounts') AS oa_tbl, to_regclass('public.auth_challenges') AS ch_tbl, EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND rowsecurity = false) AS has_unprotected_rls"
+    `SELECT
+       to_regclass('public.user_passkeys') AS pk_tbl,
+       to_regclass('public.oauth_accounts') AS oa_tbl,
+       to_regclass('public.auth_challenges') AS ch_tbl,
+       EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND rowsecurity = false) AS has_unprotected_rls,
+       EXISTS (
+         SELECT 1 FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public' AND c.relkind = 'v'
+           AND NOT COALESCE('security_invoker=true' = ANY(c.reloptions) OR 'security_invoker=on' = ANY(c.reloptions), false)
+       ) AS has_definer_view`
   );
   const row = check.rows[0] || {};
   let changed = false;
@@ -111,10 +136,10 @@ async function ensureAuthSchemaTables(pgPool = pool) {
     changed = true;
     console.log('[DB] Applied OAuth & WebAuthn Passkey schema extension');
   }
-  if (row.has_unprotected_rls || changed) {
+  if (row.has_unprotected_rls || row.has_definer_view || changed) {
     await pgPool.query(RLS_LOCKDOWN_SQL);
     changed = true;
-    console.log('[DB] Enabled Row-Level Security on all public schema tables');
+    console.log('[DB] Enabled Row-Level Security & security_invoker views on public schema');
   }
   authSchemaEnsured = true;
   return changed;
