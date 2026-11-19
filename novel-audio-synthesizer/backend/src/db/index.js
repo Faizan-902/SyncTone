@@ -73,20 +73,51 @@ CREATE TABLE IF NOT EXISTS auth_challenges (
 CREATE INDEX IF NOT EXISTS ix_auth_challenges_expires_at ON auth_challenges(expires_at);
 `;
 
+const RLS_LOCKDOWN_SQL = `
+DO $$
+DECLARE
+    tbl RECORD;
+    has_anon BOOLEAN;
+    has_authenticated BOOLEAN;
+BEGIN
+    SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') INTO has_anon;
+    SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') INTO has_authenticated;
+
+    FOR tbl IN
+        SELECT tablename
+        FROM pg_tables
+        WHERE schemaname = 'public'
+    LOOP
+        EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', tbl.tablename);
+        IF has_anon THEN
+            EXECUTE format('REVOKE ALL ON TABLE public.%I FROM anon', tbl.tablename);
+        END IF;
+        IF has_authenticated THEN
+            EXECUTE format('REVOKE ALL ON TABLE public.%I FROM authenticated', tbl.tablename);
+        END IF;
+    END LOOP;
+END $$;
+`;
+
 async function ensureAuthSchemaTables(pgPool = pool) {
   if (authSchemaEnsured) return false;
   const check = await pgPool.query(
-    "SELECT to_regclass('public.user_passkeys') AS pk_tbl, to_regclass('public.oauth_accounts') AS oa_tbl, to_regclass('public.auth_challenges') AS ch_tbl"
+    "SELECT to_regclass('public.user_passkeys') AS pk_tbl, to_regclass('public.oauth_accounts') AS oa_tbl, to_regclass('public.auth_challenges') AS ch_tbl, EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND rowsecurity = false) AS has_unprotected_rls"
   );
   const row = check.rows[0] || {};
-  if (row.pk_tbl && row.oa_tbl && row.ch_tbl) {
-    authSchemaEnsured = true;
-    return false;
+  let changed = false;
+  if (!row.pk_tbl || !row.oa_tbl || !row.ch_tbl) {
+    await pgPool.query(AUTH_EXTENSION_SQL);
+    changed = true;
+    console.log('[DB] Applied OAuth & WebAuthn Passkey schema extension');
   }
-  await pgPool.query(AUTH_EXTENSION_SQL);
+  if (row.has_unprotected_rls || changed) {
+    await pgPool.query(RLS_LOCKDOWN_SQL);
+    changed = true;
+    console.log('[DB] Enabled Row-Level Security on all public schema tables');
+  }
   authSchemaEnsured = true;
-  console.log('[DB] Applied OAuth & WebAuthn Passkey schema extension');
-  return true;
+  return changed;
 }
 
 /**
