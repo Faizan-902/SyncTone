@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const fs = require('fs');
 const path = require('path');
+const { v4: uuidv4 } = require('uuid');
 const { pool } = require('../db');
 const { Chapter } = require('../models');
 const { parseChapter } = require('../engine/textParser');
@@ -15,12 +16,13 @@ const { broadcastProgress } = require('../websocket');
 const { config } = require('../config');
 const { authenticateUser, optionalAuth, requireRole } = require('../middleware/auth');
 const { getSwiftAuth } = require('./swift');
-const { storageService } = require('../services/storageService');
+const { storageService, parseByteRange, pipeStreamSafe } = require('../services/storageService');
 const statusRouter = require('./status');
 const voicesRouter = require('./voices');
 
 const router = Router();
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SAFE_ID_REGEX = /^[a-zA-Z0-9_-]{1,128}$/;
 
 // Ensure Mongoose manifest schema accepts engine, studio_engine, engines_used, and resolved_voice_id
 try {
@@ -684,56 +686,74 @@ function needsSelfHealingReparse(chapterDoc) {
   return false;
 }
 
+const healingInFlight = new Map();
+
 async function healChapterDocument(chapterDoc, novelIdHint = null, pgPool = pool) {
   if (!chapterDoc || !chapterDoc.raw_text) return chapterDoc;
   const chapterId = String(chapterDoc.pg_chapter_id || chapterDoc._id || '1');
-  let novelId = novelIdHint || chapterDoc.novel_id || null;
-  if (!novelId && pgPool && UUID_REGEX.test(chapterId)) {
-    try {
-      const chRow = await pgPool.query('SELECT novel_id FROM chapters WHERE id = $1', [chapterId]);
-      if (chRow.rows.length > 0) novelId = chRow.rows[0].novel_id;
-    } catch (_) {}
+  if (healingInFlight.has(chapterId)) {
+    return healingInFlight.get(chapterId);
   }
 
-  const { mappedSegments, totalDurationMs, timeline, usedEngine } = await buildParsedSegmentsAndManifestAsync(
-    chapterDoc.raw_text,
-    chapterDoc.title || 'Chapter',
-    chapterId,
-    { novelId, pgPool }
-  );
+  const runHeal = async () => {
+    let novelId = novelIdHint || chapterDoc.novel_id || null;
+    if (!novelId && pgPool && UUID_REGEX.test(chapterId)) {
+      try {
+        const chRow = await pgPool.query('SELECT novel_id FROM chapters WHERE id = $1', [chapterId]);
+        if (chRow.rows.length > 0) novelId = chRow.rows[0].novel_id;
+      } catch (_) {}
+    }
 
-  const dialogueAfter = mappedSegments.filter((s) => s.type === 'dialogue');
-  const unresolvedAfter = dialogueAfter.filter((s) => {
-    const cid = String(s.character_id || s.speaker_id || '').toLowerCase().trim();
-    return !cid || cid === 'unresolved' || cid === 'unknown' || cid === 'dialogue_speaker';
-  }).length;
-  const stillUnresolved = dialogueAfter.length > 0 && unresolvedAfter / dialogueAfter.length > 0.5;
-  const stillHasStale = hasStaleSpeakerArtifacts(mappedSegments);
+    const { mappedSegments, totalDurationMs, timeline, usedEngine } = await buildParsedSegmentsAndManifestAsync(
+      chapterDoc.raw_text,
+      chapterDoc.title || 'Chapter',
+      chapterId,
+      { novelId, pgPool }
+    );
 
-  chapterDoc.segments = mappedSegments;
-  const prevManifest = chapterDoc.manifest?.toObject ? chapterDoc.manifest.toObject() : (chapterDoc.manifest || {});
-  chapterDoc.manifest = {
-    ...prevManifest,
-    total_duration_ms: totalDurationMs,
-    audio_url: prevManifest.audio_url || `/api/stream/${chapterId}`,
-    timeline,
-    healed_unresolved_engine: (stillUnresolved || stillHasStale) ? usedEngine : undefined,
+    const dialogueAfter = mappedSegments.filter((s) => s.type === 'dialogue');
+    const unresolvedAfter = dialogueAfter.filter((s) => {
+      const cid = String(s.character_id || s.speaker_id || '').toLowerCase().trim();
+      return !cid || cid === 'unresolved' || cid === 'unknown' || cid === 'dialogue_speaker';
+    }).length;
+    const stillUnresolved = dialogueAfter.length > 0 && unresolvedAfter / dialogueAfter.length > 0.5;
+    const stillHasStale = hasStaleSpeakerArtifacts(mappedSegments);
+
+    chapterDoc.segments = mappedSegments;
+    const prevManifest = chapterDoc.manifest?.toObject ? chapterDoc.manifest.toObject() : (chapterDoc.manifest || {});
+    const hasExistingSynth =
+      Boolean(prevManifest.engine || prevManifest.studio_engine) &&
+      Array.isArray(prevManifest.timeline) &&
+      prevManifest.timeline.length > 0;
+    chapterDoc.manifest = {
+      ...prevManifest,
+      total_duration_ms: hasExistingSynth ? (prevManifest.total_duration_ms || totalDurationMs) : totalDurationMs,
+      audio_url: prevManifest.audio_url || `/api/stream/${chapterId}`,
+      timeline: hasExistingSynth ? prevManifest.timeline : timeline,
+      healed_unresolved_engine: (stillUnresolved || stillHasStale) ? usedEngine : undefined,
+    };
+    if (typeof chapterDoc.markModified === 'function') {
+      chapterDoc.markModified('segments');
+      chapterDoc.markModified('manifest');
+    }
+    await chapterDoc.save().catch((err) => {
+      console.warn(`[Chapters] Self-healing Mongo save warning for ${chapterId}: ${err.message}`);
+    });
+
+    if (novelId && pgPool) {
+      await upsertDiscoveredCharactersPg(pgPool, novelId, mappedSegments, { pruneStale: true });
+    }
+    if (typeof voicesRouter.clearVoiceCaches === 'function') {
+      voicesRouter.clearVoiceCaches({ chapterId, novelId, clearAll: true });
+    }
+    return chapterDoc;
   };
-  if (typeof chapterDoc.markModified === 'function') {
-    chapterDoc.markModified('segments');
-    chapterDoc.markModified('manifest');
-  }
-  await chapterDoc.save().catch((err) => {
-    console.warn(`[Chapters] Self-healing Mongo save warning for ${chapterId}: ${err.message}`);
-  });
 
-  if (novelId && pgPool) {
-    await upsertDiscoveredCharactersPg(pgPool, novelId, mappedSegments, { pruneStale: true });
-  }
-  if (typeof voicesRouter.clearVoiceCaches === 'function') {
-    voicesRouter.clearVoiceCaches({ chapterId, novelId, clearAll: true });
-  }
-  return chapterDoc;
+  const promise = runHeal().finally(() => {
+    healingInFlight.delete(chapterId);
+  });
+  healingInFlight.set(chapterId, promise);
+  return promise;
 }
 
 /**
@@ -745,6 +765,18 @@ async function ingestChapter({ novelId, title, text, chapterNumber, requestedBy 
   let createdPgChapter = null;
 
   try {
+    // Parse segments & timeline BEFORE opening a PostgreSQL transaction so long-running LLM/OCR calls never hold row locks
+    const preChapterId = uuidv4();
+    const preliminaryTitle = title && typeof title === 'string' && title.trim().length > 0
+      ? title.trim()
+      : 'Chapter';
+    const { mappedSegments, totalDurationMs, timeline } = await buildParsedSegmentsAndManifestAsync(
+      text,
+      preliminaryTitle,
+      preChapterId,
+      { novelId, pgPool: pool }
+    );
+
     client = await pool.connect();
     await client.query('BEGIN');
 
@@ -774,11 +806,11 @@ async function ingestChapter({ novelId, title, text, chapterNumber, requestedBy 
 
     // 3. Insert relational chapter record into PostgreSQL
     const insertChapterQuery = `
-      INSERT INTO chapters (novel_id, chapter_number, title, status, audio_version, total_duration_ms)
-      VALUES ($1, $2, $3, 'draft', 1, 0)
+      INSERT INTO chapters (id, novel_id, chapter_number, title, status, audio_version, total_duration_ms)
+      VALUES ($1, $2, $3, $4, 'draft', 1, 0)
       RETURNING id, novel_id, chapter_number, title, status, audio_version, total_duration_ms, created_at, updated_at;
     `;
-    const chapterRes = await client.query(insertChapterQuery, [novelId, num, chapterTitle]);
+    const chapterRes = await client.query(insertChapterQuery, [preChapterId, novelId, num, chapterTitle]);
     createdPgChapter = chapterRes.rows[0];
 
     // 4. Enqueue synthesis job into PostgreSQL within the same transaction
@@ -804,13 +836,6 @@ async function ingestChapter({ novelId, title, text, chapterNumber, requestedBy 
     job.chapter_id = createdPgChapter.id;
 
     // 5. Create document in MongoDB (linked via pg_chapter_id) with pre-parsed segments & timeline
-    const { mappedSegments, totalDurationMs, timeline } = await buildParsedSegmentsAndManifestAsync(
-      text,
-      createdPgChapter.title,
-      createdPgChapter.id,
-      { novelId, pgPool: pool }
-    );
-
     const mongoDoc = new Chapter({
       pg_chapter_id: createdPgChapter.id,
       novel_id: createdPgChapter.novel_id,
@@ -1218,6 +1243,7 @@ router.post('/parse/:chapter_id', optionalAuth, async (req, res) => {
     return res.json(parsedOutput);
   } catch (err) {
     console.error('[Parse Chapter Error]:', err.message);
+    broadcastProgress(chapter_id, { status: 'failed', error: err.message });
     try {
       await pool.query(
         "UPDATE chapters SET status = 'failed', updated_at = now() WHERE id = $1",
@@ -1249,10 +1275,10 @@ router.post('/synthesize/:chapter_id', optionalAuth, async (req, res) => {
       return res.status(400).json({ detail: 'Chapter not yet parsed. Call /parse first.' });
     }
 
-    // Mark as synthesizing in PostgreSQL
+    // Mark as processing in PostgreSQL
     try {
       await pool.query(
-        "UPDATE chapters SET status = 'synthesizing', updated_at = now() WHERE id = $1",
+        "UPDATE chapters SET status = 'processing', updated_at = now() WHERE id = $1",
         [chapter_id]
       );
       await pool.query(
@@ -1260,7 +1286,9 @@ router.post('/synthesize/:chapter_id', optionalAuth, async (req, res) => {
          WHERE id IN (SELECT job_id FROM chapter_synthesis_job_targets WHERE chapter_id = $1)`,
         [chapter_id]
       );
-    } catch (_dbErr) {}
+    } catch (dbErr) {
+      console.warn('[Synthesize] DB status update warning:', dbErr.message);
+    }
 
     const total = chapterDoc.segments.length;
     const segmentAudios = [];
@@ -1433,6 +1461,8 @@ router.post('/synthesize/:chapter_id', optionalAuth, async (req, res) => {
         voice_id: t.voice_id,
         resolved_voice_id: t.resolved_voice_id || t.voice_id,
         text: t.text || '',
+        type: t.type || 'narration',
+        image_url: t.image_url || null,
       })),
     };
     chapterDoc.set('manifest.engine', preferredEngine, { strict: false });
@@ -1621,7 +1651,7 @@ router.all('/stream/:chapter_id', async (req, res, next) => {
             if (s3Obj.stream && typeof s3Obj.stream.destroy === 'function') s3Obj.stream.destroy();
             return res.end();
           }
-          return s3Obj.stream.pipe(res);
+          return pipeStreamSafe(s3Obj.stream, res);
         }
       } catch (s3Err) {
         console.warn('[Stream Cloud Fallback Warning]:', s3Err.message);
@@ -1646,13 +1676,12 @@ router.all('/stream/:chapter_id', async (req, res, next) => {
           }
           const rangeHdr = req.headers.range;
           if (rangeHdr) {
-            const parts = rangeHdr.replace(/bytes=/, '').split('-');
-            const start = parseInt(parts[0], 10);
-            const end = Math.min(parts[1] ? parseInt(parts[1], 10) : total - 1, total - 1);
-            if (isNaN(start) || start < 0 || start >= total || start > end) {
+            const parsedRange = parseByteRange(rangeHdr, total);
+            if (!parsedRange || parsedRange.invalid) {
               res.writeHead(416, { ...baseHeaders, 'Content-Range': `bytes */${total}` });
               return res.end();
             }
+            const { start, end } = parsedRange;
             const slice = fallbackBuf.subarray(start, end + 1);
             res.writeHead(206, {
               ...baseHeaders,
@@ -1695,11 +1724,8 @@ router.all('/stream/:chapter_id', async (req, res, next) => {
   }
 
   if (range) {
-    const parts = range.replace(/bytes=/, '').split('-');
-    const start = parseInt(parts[0], 10);
-    const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-
-    if (isNaN(start) || start >= fileSize || end >= fileSize || start > end) {
+    const parsedRange = parseByteRange(range, fileSize);
+    if (!parsedRange || parsedRange.invalid) {
       res.writeHead(416, {
         'Content-Range': `bytes */${fileSize}`,
         ...defaultHeaders,
@@ -1707,6 +1733,7 @@ router.all('/stream/:chapter_id', async (req, res, next) => {
       return res.end();
     }
 
+    const { start, end } = parsedRange;
     const chunksize = end - start + 1;
 
     const file = fs.createReadStream(audioPath, { start, end });
@@ -1715,13 +1742,13 @@ router.all('/stream/:chapter_id', async (req, res, next) => {
       'Content-Length': chunksize,
       ...defaultHeaders,
     });
-    file.pipe(res);
+    pipeStreamSafe(file, res);
   } else {
     res.writeHead(200, {
       'Content-Length': fileSize,
       ...defaultHeaders,
     });
-    fs.createReadStream(audioPath).pipe(res);
+    pipeStreamSafe(fs.createReadStream(audioPath), res);
   }
 });
 
@@ -1787,6 +1814,7 @@ router.get('/chapters/:id/progress', async (req, res) => {
         const statusMap = {
           draft: 'idle',
           parsed: 'idle',
+          processing: 'synthesizing',
           synthesizing: 'synthesizing',
           completed: 'complete',
           failed: 'failed',
@@ -1823,7 +1851,19 @@ router.get('/chapters/:id/progress', async (req, res) => {
 });
 
 const PERSISTED_AUDIO_CACHE_TTL_MS = 60000;
+const MAX_PERSISTED_AUDIO_CACHE = 500;
 const persistedAudioCache = new Map();
+
+function setPersistedAudioCache(key, value) {
+  const k = String(key);
+  if (persistedAudioCache.has(k)) {
+    persistedAudioCache.delete(k);
+  } else if (persistedAudioCache.size >= MAX_PERSISTED_AUDIO_CACHE) {
+    const oldest = persistedAudioCache.keys().next().value;
+    if (oldest !== undefined) persistedAudioCache.delete(oldest);
+  }
+  persistedAudioCache.set(k, { ts: Date.now(), value });
+}
 
 function invalidatePersistedAudioCache(chapterId) {
   if (chapterId) persistedAudioCache.delete(String(chapterId));
@@ -1831,34 +1871,37 @@ function invalidatePersistedAudioCache(chapterId) {
 }
 
 async function hasPersistedChapterAudio(chapterId, swiftAudioObject) {
+  const safeId = path.basename(String(chapterId || ''));
+  if (!SAFE_ID_REGEX.test(safeId)) return false;
+
   if (process.env.NODE_ENV !== 'test') {
-    const cached = persistedAudioCache.get(String(chapterId));
+    const cached = persistedAudioCache.get(safeId);
     if (cached && Date.now() - cached.ts < PERSISTED_AUDIO_CACHE_TTL_MS) {
       return cached.value;
     }
   }
 
-  const audioPathMp3 = path.join(config.paths.outputDir, `${chapterId}.mp3`);
-  const audioPathWav = path.join(config.paths.outputDir, `${chapterId}.wav`);
+  const audioPathMp3 = path.join(config.paths.outputDir, `${safeId}.mp3`);
+  const audioPathWav = path.join(config.paths.outputDir, `${safeId}.wav`);
   const hasMp3 = fs.existsSync(audioPathMp3) && fs.statSync(audioPathMp3).size > 0;
   const hasWav = fs.existsSync(audioPathWav) && fs.statSync(audioPathWav).size > 0;
   if (hasMp3 || hasWav) {
-    persistedAudioCache.set(String(chapterId), { ts: Date.now(), value: true });
+    setPersistedAudioCache(safeId, true);
     return true;
   }
 
   if (storageService.isS3Configured()) {
     const candidates = Array.from(
-      new Set([swiftAudioObject, `${chapterId}.mp3`, `${chapterId}.opus`, `${chapterId}.wav`].filter(Boolean))
+      new Set([swiftAudioObject, `${safeId}.mp3`, `${safeId}.opus`, `${safeId}.wav`].filter(Boolean))
     );
     const existsFlags = await Promise.all(
       candidates.map((key) => storageService.objectExists({ bucketType: 'audio', key }).catch(() => false))
     );
     const found = existsFlags.some(Boolean);
-    persistedAudioCache.set(String(chapterId), { ts: Date.now(), value: found });
+    setPersistedAudioCache(safeId, found);
     return found;
   }
-  persistedAudioCache.set(String(chapterId), { ts: Date.now(), value: false });
+  setPersistedAudioCache(safeId, false);
   return false;
 }
 
@@ -1868,6 +1911,9 @@ async function hasPersistedChapterAudio(chapterId, swiftAudioObject) {
  */
 router.get('/chapters/:id', async (req, res) => {
   const { id } = req.params;
+  if (!id || !SAFE_ID_REGEX.test(id)) {
+    return res.status(400).json({ error: 'Invalid chapter ID format.' });
+  }
   try {
     const [pgRes, chapterDoc] = await Promise.all([
       UUID_REGEX.test(id)
@@ -1933,6 +1979,9 @@ router.get('/chapters/:id', async (req, res) => {
  */
 router.get('/chapters/:id/track-status', async (req, res) => {
   const { id } = req.params;
+  if (!id || !SAFE_ID_REGEX.test(id)) {
+    return res.status(400).json({ error: 'Invalid chapter ID format.' });
+  }
   try {
     let pgData = {};
     if (UUID_REGEX.test(id)) {
@@ -2002,6 +2051,9 @@ router.get('/chapters/:id/segments', async (req, res) => {
  */
 router.get('/manifest/:chapter_id', async (req, res) => {
   const { chapter_id } = req.params;
+  if (!chapter_id || !SAFE_ID_REGEX.test(chapter_id)) {
+    return res.status(400).json({ error: 'Invalid chapter ID format.' });
+  }
 
   try {
     const chapterDoc = await Chapter.findOne({ pg_chapter_id: chapter_id });

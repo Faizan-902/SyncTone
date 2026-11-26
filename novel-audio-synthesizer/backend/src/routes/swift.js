@@ -2,7 +2,7 @@ const { Router } = require('express');
 const axios = require('axios');
 const { pool } = require('../db');
 const { config } = require('../config');
-const { storageService } = require('../services/storageService');
+const { storageService, parseByteRange, pipeStreamSafe } = require('../services/storageService');
 
 const router = Router();
 
@@ -85,7 +85,7 @@ router.get('/chapters/:id/audio', async (req, res) => {
         if (s3Obj.status === 416 || !s3Obj.stream) {
           return res.end();
         }
-        return s3Obj.stream.pipe(res);
+        return pipeStreamSafe(s3Obj.stream, res);
       }
     }
 
@@ -146,7 +146,7 @@ router.get('/chapters/:id/audio', async (req, res) => {
     res.setHeader('Content-Type', swiftContentType);
     res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
 
-    swiftRes.data.pipe(res);
+    pipeStreamSafe(swiftRes.data, res);
   } catch (err) {
     if (err.response && err.response.status === 401) {
       cachedSwiftToken = null;
@@ -169,27 +169,26 @@ router.get('/chapters/:id/audio', async (req, res) => {
       const contentType = fallbackPath.endsWith('.mp3') ? 'audio/mpeg' : 'audio/wav';
 
       if (range) {
-        const parts = range.replace(/bytes=/, '').split('-');
-        const start = parseInt(parts[0], 10);
-        const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-        if (isNaN(start) || start >= fileSize || end >= fileSize || start > end) {
+        const parsedRange = parseByteRange(range, fileSize);
+        if (!parsedRange || parsedRange.invalid) {
           res.writeHead(416, { 'Content-Range': `bytes */${fileSize}` });
           return res.end();
         }
+        const { start, end } = parsedRange;
         res.writeHead(206, {
           'Content-Range': `bytes ${start}-${end}/${fileSize}`,
           'Accept-Ranges': 'bytes',
           'Content-Length': end - start + 1,
           'Content-Type': contentType,
         });
-        return fs.createReadStream(fallbackPath, { start, end }).pipe(res);
+        return pipeStreamSafe(fs.createReadStream(fallbackPath, { start, end }), res);
       } else {
         res.writeHead(200, {
           'Content-Length': fileSize,
           'Content-Type': contentType,
           'Accept-Ranges': 'bytes',
         });
-        return fs.createReadStream(fallbackPath).pipe(res);
+        return pipeStreamSafe(fs.createReadStream(fallbackPath), res);
       }
     }
 
