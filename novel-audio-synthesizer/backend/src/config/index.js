@@ -79,10 +79,16 @@ function parseCorsOrigins(rawOrigins) {
   return Array.from(new Set([...DEFAULT_CORS_ORIGINS, ...extras]));
 }
 
+const isProdRuntime = process.env.NODE_ENV === 'production' || IS_VERCEL;
+const resolvedJwtSecret = process.env.JWT_SECRET || (isProdRuntime ? '' : 'synctone_super_secret_jwt_key_2026_dev_mode');
+if (isProdRuntime && (!resolvedJwtSecret || resolvedJwtSecret.length < 32)) {
+  throw new Error('Fatal security configuration: JWT_SECRET must be set to at least 32 characters in production.');
+}
+
 const config = {
   port: parseInt(process.env.PORT || '4000', 10),
   nodeEnv: process.env.NODE_ENV || 'development',
-  jwtSecret: process.env.JWT_SECRET || 'synctone_super_secret_jwt_key_2026_dev_mode',
+  jwtSecret: resolvedJwtSecret,
   lowMemoryMode: process.env.LOW_MEMORY_MODE === 'true' || IS_VERCEL,
   corsOrigins: parseCorsOrigins(process.env.CORS_ORIGINS),
   allowVercelPreviews: process.env.ALLOW_VERCEL_PREVIEWS !== 'false',

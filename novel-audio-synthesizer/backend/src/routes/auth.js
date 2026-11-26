@@ -53,33 +53,52 @@ function issueSessionCookie(res, user) {
   return { token, user: userPayload };
 }
 
+function getTrustedOriginsSet(req) {
+  const set = new Set();
+  if (config.auth?.origin) {
+    set.add(config.auth.origin.replace(/\/$/, ''));
+  }
+  if (Array.isArray(config.corsOrigins)) {
+    config.corsOrigins.forEach((o) => {
+      if (o && typeof o === 'string') set.add(o.replace(/\/$/, ''));
+    });
+  }
+  set.add('https://synctone-five.vercel.app');
+  if (req) {
+    const proto = String(req.get('x-forwarded-proto') || req.protocol || 'http').split(',')[0].trim();
+    const host = String(req.get('host') || 'localhost').split(',')[0].trim();
+    if (host) {
+      set.add(`${proto}://${host}`.replace(/\/$/, ''));
+    }
+  }
+  return set;
+}
+
 function resolveWebAuthnContext(req) {
   const originHeader = req.get('origin');
   const proto = String(req.get('x-forwarded-proto') || req.protocol || 'http').split(',')[0].trim();
-  const host = String(req.get('x-forwarded-host') || req.get('host') || 'localhost').split(',')[0].trim();
+  const host = String(req.get('host') || 'localhost').split(',')[0].trim();
   const hostNoPort = host.split(':')[0];
 
-  const origins = new Set();
-  if (config.auth?.origin) {
-    origins.add(config.auth.origin.replace(/\/$/, ''));
-  }
+  const trustedOrigins = getTrustedOriginsSet(req);
+  const origins = new Set(trustedOrigins);
 
-  let rpId = config.auth?.rpId || hostNoPort;
-  let baseOrigin = config.auth?.origin || `${proto}://${host}`;
+  const rpId = config.auth?.rpId || hostNoPort;
+  let baseOrigin = (config.auth?.origin || `${proto}://${host}`).replace(/\/$/, '');
 
   if (originHeader) {
     try {
       const parsed = new URL(originHeader);
       const cleanOrigin = `${parsed.protocol}//${parsed.host}`;
-      origins.add(cleanOrigin);
-      baseOrigin = cleanOrigin;
-      if (!config.auth?.rpId) {
-        rpId = parsed.hostname;
+      if (
+        trustedOrigins.has(cleanOrigin) ||
+        /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(cleanOrigin)
+      ) {
+        origins.add(cleanOrigin);
+        baseOrigin = cleanOrigin;
       }
     } catch (_) {}
   }
-
-  origins.add(`${proto}://${host}`);
 
   return {
     rpName: config.auth?.rpName || 'SyncTone Audio Studio',
@@ -107,7 +126,14 @@ async function generateUniqueUsername(preferredName, email) {
   return `${safeBase.slice(0, 36)}_${Date.now().toString(36)}`;
 }
 
-async function findOrCreateOAuthUser({ provider, providerAccountId, email, displayName, avatarUrl }) {
+async function findOrCreateOAuthUser({
+  provider,
+  providerAccountId,
+  email,
+  emailVerified = true,
+  displayName,
+  avatarUrl,
+}) {
   const cleanEmail = String(email || '').toLowerCase().trim();
   if (!cleanEmail || !cleanEmail.includes('@')) {
     throw new Error('OAuth provider did not return a verified email address.');
@@ -135,12 +161,14 @@ async function findOrCreateOAuthUser({ provider, providerAccountId, email, displ
     return existingUser;
   }
 
-  // 2. Match by verified email or create new passwordless user
+  // 2. Match by verified email only when provider verified the email; otherwise create new passwordless user
   let userRow = null;
-  const emailRes = await pool.query(
-    'SELECT id, username, email, role, avatar_url FROM users WHERE LOWER(email) = $1 LIMIT 1',
-    [cleanEmail]
-  );
+  const emailRes = emailVerified
+    ? await pool.query(
+        'SELECT id, username, email, role, avatar_url FROM users WHERE LOWER(email) = $1 LIMIT 1',
+        [cleanEmail]
+      )
+    : { rows: [] };
 
   if (emailRes.rows.length > 0) {
     userRow = emailRes.rows[0];
@@ -176,6 +204,8 @@ async function findOrCreateOAuthUser({ provider, providerAccountId, email, displ
   return userRow;
 }
 
+const ALLOWED_NEON_JWT_ALGS = new Set(['EdDSA', 'RS256', 'ES256']);
+
 async function verifyNeonAuthJwt(tokenStr) {
   const neonBase = config.auth?.neonAuthBaseUrl;
   if (!neonBase || !tokenStr || typeof tokenStr !== 'string') {
@@ -190,6 +220,10 @@ async function verifyNeonAuthJwt(tokenStr) {
   const header = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8'));
   const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
 
+  if (!header?.alg || !ALLOWED_NEON_JWT_ALGS.has(header.alg)) {
+    throw new Error('Unsupported Neon Auth JWT algorithm.');
+  }
+
   if (!neonJwksCache.keys.length || Date.now() - neonJwksCache.fetchedAt > 5 * 60 * 1000) {
     const jwksResp = await axios.get(`${neonBase}/.well-known/jwks.json`, { timeout: 6000 });
     neonJwksCache = {
@@ -198,9 +232,11 @@ async function verifyNeonAuthJwt(tokenStr) {
     };
   }
 
-  const jwk =
-    neonJwksCache.keys.find((k) => !header.kid || k.kid === header.kid) ||
-    neonJwksCache.keys[0];
+  const jwk = header.kid
+    ? neonJwksCache.keys.find((k) => k.kid === header.kid)
+    : neonJwksCache.keys.length === 1
+      ? neonJwksCache.keys[0]
+      : null;
   if (!jwk) {
     throw new Error('Neon Auth JWKS key not found.');
   }
@@ -214,8 +250,14 @@ async function verifyNeonAuthJwt(tokenStr) {
   if (!validSig) {
     throw new Error('Invalid Neon Auth JWT signature.');
   }
-  if (payload.exp && Date.now() >= payload.exp * 1000) {
-    throw new Error('Expired Neon Auth token.');
+  if (typeof payload.exp !== 'number' || Date.now() >= payload.exp * 1000) {
+    throw new Error('Missing or expired Neon Auth token.');
+  }
+  if (payload.iss) {
+    const expectedIssOrigin = new URL(neonBase).origin;
+    if (!String(payload.iss).startsWith(expectedIssOrigin)) {
+      throw new Error('Invalid Neon Auth token issuer.');
+    }
   }
 
   return payload;
@@ -788,12 +830,14 @@ function resolveTrustedNeonOrigin(baseOrigin) {
 function isSafeReturnOrigin(candidate) {
   if (!candidate || typeof candidate !== 'string') return false;
   const clean = candidate.replace(/\/$/, '');
-  return (
-    /^https:\/\/[a-z0-9-]+\.vercel\.app$/i.test(clean) ||
+  if (
     /^http:\/\/localhost(?::\d+)?$/i.test(clean) ||
-    /^http:\/\/127\.0\.0\.1(?::\d+)?$/i.test(clean) ||
-    (config.auth?.origin && clean === config.auth.origin.replace(/\/$/, ''))
-  );
+    /^http:\/\/127\.0\.0\.1(?::\d+)?$/i.test(clean)
+  ) {
+    return true;
+  }
+  const allowed = getTrustedOriginsSet(null);
+  return allowed.has(clean);
 }
 
 /**
@@ -948,27 +992,17 @@ router.get('/auth/oauth/neon/callback', async (req, res) => {
     }
 
     if (chRows.length === 0) {
-      const fallbackRes = await pool.query(
-        `DELETE FROM auth_challenges
-         WHERE challenge_id = (
-           SELECT challenge_id FROM auth_challenges
-           WHERE flow_type = 'neon_oauth' AND expires_at > now()
-           ORDER BY created_at DESC LIMIT 1
-         )
-         RETURNING *`
-      );
-      chRows = fallbackRes.rows;
+      res.clearCookie('synctone_neon_challenge', getCookieSettings());
+      return res.redirect(`${returnOrigin}/?auth_error=invalid_oauth_challenge`);
     }
 
-    if (chRows.length > 0) {
-      cookieHeader = chRows[0].challenge || '';
-      const meta = chRows[0].metadata || {};
-      if (isSafeReturnOrigin(meta.returnOrigin)) {
-        returnOrigin = meta.returnOrigin.replace(/\/$/, '');
-      }
-      returnTo = meta.returnTo || '/';
-      trustedOrigin = meta.trustedOrigin || trustedOrigin;
+    cookieHeader = chRows[0].challenge || '';
+    const meta = chRows[0].metadata || {};
+    if (isSafeReturnOrigin(meta.returnOrigin)) {
+      returnOrigin = meta.returnOrigin.replace(/\/$/, '');
     }
+    returnTo = meta.returnTo || '/';
+    trustedOrigin = meta.trustedOrigin || trustedOrigin;
 
     res.clearCookie('synctone_neon_challenge', getCookieSettings());
 
@@ -996,6 +1030,7 @@ router.get('/auth/oauth/neon/callback', async (req, res) => {
         profileUser = {
           id: claims.sub || claims.userId,
           email: claims.email,
+          emailVerified: claims.email_verified ?? claims.emailVerified,
           name: claims.name || claims.preferred_username,
           image: claims.picture || claims.image,
         };
@@ -1006,10 +1041,13 @@ router.get('/auth/oauth/neon/callback', async (req, res) => {
       return res.redirect(`${returnOrigin}/?auth_error=google_session_empty`);
     }
 
+    const neonEmailVerified = (profileUser.emailVerified ?? profileUser.email_verified) === true;
+
     const userRecord = await findOrCreateOAuthUser({
       provider: 'google',
       providerAccountId: profileUser.id || profileUser.email,
       email: profileUser.email,
+      emailVerified: neonEmailVerified,
       displayName: profileUser.name || profileUser.email.split('@')[0],
       avatarUrl: profileUser.image || profileUser.picture || null,
     });
@@ -1080,7 +1118,7 @@ router.get('/auth/oauth/handoff', async (req, res) => {
 
 /**
  * POST /api/auth/oauth/github/verify
- * Verifies a GitHub account via Personal Access Token or GitHub username lookup against api.github.com.
+ * Verifies a GitHub account strictly via a Personal Access Token against api.github.com.
  */
 router.post('/auth/oauth/github/verify', async (req, res) => {
   try {
@@ -1092,8 +1130,10 @@ router.post('/auth/oauth/github/verify', async (req, res) => {
     }
     cleanHandle = cleanHandle.replace(/^@+/, '').trim();
 
-    if (!token && (!cleanHandle || !/^[a-zA-Z0-9-]{1,39}$/.test(cleanHandle))) {
-      return res.status(400).json({ error: 'Please enter a valid GitHub username (e.g. octocat).' });
+    if (!token || typeof token !== 'string' || !token.trim()) {
+      return res.status(400).json({
+        error: 'A GitHub Personal Access Token is required to verify GitHub account ownership.',
+      });
     }
 
     const baseHeaders = {
@@ -1101,42 +1141,37 @@ router.post('/auth/oauth/github/verify', async (req, res) => {
       Accept: 'application/vnd.github+json',
     };
 
-    let ghUser = null;
-    let resolvedEmail = '';
-
-    if (token && typeof token === 'string' && token.trim()) {
-      const authHeaders = { ...baseHeaders, Authorization: `Bearer ${token.trim()}` };
-      const [userResp, emailsResp] = await Promise.all([
-        axios.get('https://api.github.com/user', { headers: authHeaders, timeout: 8000 }),
-        axios.get('https://api.github.com/user/emails', { headers: authHeaders, timeout: 8000 }).catch(() => ({ data: [] })),
-      ]);
-      ghUser = userResp.data;
-      const primaryEmailObj =
-        (Array.isArray(emailsResp.data) && emailsResp.data.find((e) => e.primary && e.verified)) ||
-        (Array.isArray(emailsResp.data) && emailsResp.data.find((e) => e.verified)) ||
-        null;
-      resolvedEmail = primaryEmailObj?.email || ghUser?.email || '';
-    } else {
-      const userResp = await axios.get(`https://api.github.com/users/${encodeURIComponent(cleanHandle)}`, {
-        headers: baseHeaders,
-        timeout: 8000,
-      });
-      ghUser = userResp.data;
-      resolvedEmail = ghUser?.email || '';
-    }
+    const authHeaders = { ...baseHeaders, Authorization: `Bearer ${token.trim()}` };
+    const [userResp, emailsResp] = await Promise.all([
+      axios.get('https://api.github.com/user', { headers: authHeaders, timeout: 8000 }),
+      axios.get('https://api.github.com/user/emails', { headers: authHeaders, timeout: 8000 }).catch(() => ({ data: [] })),
+    ]);
+    const ghUser = userResp.data;
 
     if (!ghUser || !ghUser.id || !ghUser.login) {
       return res.status(404).json({ error: 'GitHub account not found.' });
     }
 
-    if (!resolvedEmail) {
-      resolvedEmail = `${String(ghUser.login).toLowerCase()}@users.noreply.github.com`;
+    if (cleanHandle && ghUser.login.toLowerCase() !== cleanHandle.toLowerCase()) {
+      return res.status(403).json({
+        error: 'The provided GitHub token does not match the entered GitHub username.',
+      });
     }
+
+    const primaryEmailObj =
+      (Array.isArray(emailsResp.data) && emailsResp.data.find((e) => e.primary && e.verified)) ||
+      (Array.isArray(emailsResp.data) && emailsResp.data.find((e) => e.verified)) ||
+      null;
+    const emailVerified = Boolean(primaryEmailObj?.verified);
+    const resolvedEmail =
+      primaryEmailObj?.email ||
+      `${ghUser.id}+${String(ghUser.login).toLowerCase()}@users.noreply.github.com`;
 
     const userRecord = await findOrCreateOAuthUser({
       provider: 'github',
       providerAccountId: ghUser.id,
       email: resolvedEmail,
+      emailVerified,
       displayName: ghUser.login || ghUser.name,
       avatarUrl: ghUser.avatar_url || null,
     });
@@ -1151,9 +1186,9 @@ router.post('/auth/oauth/github/verify', async (req, res) => {
   } catch (err) {
     const status = err.response?.status;
     if (status === 404) {
-      return res.status(404).json({ error: 'GitHub username not found. Please check the spelling and try again.' });
+      return res.status(404).json({ error: 'GitHub account not found. Please check your token and try again.' });
     }
-    if (status === 401) {
+    if (status === 401 || status === 403) {
       return res.status(401).json({ error: 'GitHub token is invalid or expired.' });
     }
     console.error('[GitHub Verify Error]:', err.message);
@@ -1212,6 +1247,7 @@ router.get('/auth/oauth/:provider/callback', async (req, res) => {
       profile = {
         providerAccountId: userInfoResp.data?.sub,
         email: userInfoResp.data?.email,
+        emailVerified: userInfoResp.data?.email_verified === true,
         displayName: userInfoResp.data?.name || userInfoResp.data?.given_name,
         avatarUrl: userInfoResp.data?.picture,
       };
@@ -1243,6 +1279,7 @@ router.get('/auth/oauth/:provider/callback', async (req, res) => {
       profile = {
         providerAccountId: userResp.data?.id,
         email: primaryEmailObj?.email || userResp.data?.email,
+        emailVerified: Boolean(primaryEmailObj?.verified),
         displayName: userResp.data?.login || userResp.data?.name,
         avatarUrl: userResp.data?.avatar_url,
       };
@@ -1282,6 +1319,7 @@ router.post('/auth/oauth/neon-session', async (req, res) => {
       provider: String(provider || 'neon_auth'),
       providerAccountId: claims.sub || claims.userId || claims.email,
       email: claims.email,
+      emailVerified: (claims.email_verified ?? claims.emailVerified) === true,
       displayName: claims.name || claims.preferred_username,
       avatarUrl: claims.picture || claims.image || null,
     });
