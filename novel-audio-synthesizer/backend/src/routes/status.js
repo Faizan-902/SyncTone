@@ -1,13 +1,17 @@
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { Router } = require('express');
 const { ttsEngine } = require('../engine/ttsEngine');
 const { attributionEngine } = require('../engine/attribution');
 const { getParsersStatus } = require('../engine/parsers');
 const { config } = require('../config');
+const { authenticateUser, requireRole } = require('../middleware/auth');
 
 const router = Router();
-const PARSER_CONFIG_PATH = path.join(config.paths.outputDir, 'parser_config.json');
+const PARSER_CONFIG_PATH = process.env.VERCEL
+  ? path.join(os.tmpdir(), 'synctone-config', 'parser_config.json')
+  : path.resolve(__dirname, '../../data/parser_config.json');
 
 const VALID_ENGINES = new Set(['heuristic', 'gemini', 'ollama', 'ocr', 'unlimited-ocr']);
 const VALID_SENSITIVITIES = new Set(['balanced', 'aggressive', 'strict']);
@@ -74,9 +78,11 @@ function sanitizeParserConfig(incoming = {}, baseConfig = null) {
     },
     gemini: {
       apiKey:
-        gemSrc.apiKey !== undefined
-          ? String(gemSrc.apiKey).trim()
-          : defaults.gemini.apiKey,
+        gemSrc.clearApiKey === true
+          ? ''
+          : typeof gemSrc.apiKey === 'string' && gemSrc.apiKey.trim().length > 0
+            ? gemSrc.apiKey.trim()
+            : defaults.gemini.apiKey,
       model:
         typeof gemSrc.model === 'string' && gemSrc.model.trim()
           ? gemSrc.model.trim()
@@ -128,42 +134,85 @@ function saveParserConfig(incoming) {
   return next;
 }
 
+function isDisallowedSsrfHostname(hostname) {
+  const host = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (!host) return true;
+  if (
+    host === '0.0.0.0' ||
+    host === 'metadata.google.internal' ||
+    host.endsWith('.internal') ||
+    host.startsWith('169.254.') ||
+    host === 'fe80::' ||
+    host.startsWith('fe80:')
+  ) {
+    return true;
+  }
+  const isProd = process.env.NODE_ENV === 'production' || Boolean(process.env.VERCEL);
+  if (isProd) {
+    if (
+      host === 'localhost' ||
+      host === '::1' ||
+      /^127\./.test(host) ||
+      /^10\./.test(host) ||
+      /^192\.168\./.test(host) ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+      /^fc00:|^fd/i.test(host)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function validateHttpUrl(value) {
   try {
     const parsed = new URL(String(value || ''));
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+    if (isDisallowedSsrfHostname(parsed.hostname)) return false;
+    return true;
   } catch (_) {
     return false;
   }
 }
 
+function redactParserConfig(cfg) {
+  return {
+    ...cfg,
+    gemini: {
+      model: cfg.gemini?.model || 'gemini-2.5-flash',
+      temperature: cfg.gemini?.temperature ?? 0.1,
+      apiKey: '',
+      hasKey: Boolean(cfg.gemini?.apiKey),
+    },
+    geminiConfigured: Boolean(cfg.gemini?.apiKey),
+  };
+}
+
 // GET /api/status/parser-config
 router.get('/status/parser-config', (_req, res) => {
   const cfg = loadParserConfig();
-  return res.json({
-    ...cfg,
-    geminiConfigured: Boolean(cfg.gemini.apiKey),
-  });
+  return res.json(redactParserConfig(cfg));
 });
 
 // POST /api/status/parser-config
-router.post('/status/parser-config', (req, res) => {
+router.post('/status/parser-config', authenticateUser, requireRole('writer', 'admin'), (req, res) => {
   try {
     const payload = req.body && typeof req.body === 'object' ? req.body : {};
     const incomingOllamaUrl = payload?.ollama?.url;
     if (incomingOllamaUrl !== undefined && incomingOllamaUrl !== '' && !validateHttpUrl(incomingOllamaUrl)) {
-      return res.status(400).json({ ok: false, error: 'Invalid Ollama URL; must start with http:// or https://' });
+      return res.status(400).json({ ok: false, error: 'Invalid or disallowed Ollama URL; must start with http:// or https://' });
     }
     const incomingOcrUrl = payload?.ocr?.baseUrl || payload?.['unlimited-ocr']?.baseUrl;
     if (incomingOcrUrl !== undefined && incomingOcrUrl !== '' && !validateHttpUrl(incomingOcrUrl)) {
-      return res.status(400).json({ ok: false, error: 'Invalid Vision OCR baseUrl; must start with http:// or https://' });
+      return res.status(400).json({ ok: false, error: 'Invalid or disallowed Vision OCR baseUrl; must start with http:// or https://' });
     }
 
     const saved = saveParserConfig(payload);
+    const safeSaved = redactParserConfig(saved);
     return res.json({
       ok: true,
-      config: saved,
-      ...saved,
+      config: safeSaved,
+      ...safeSaved,
     });
   } catch (err) {
     return res.status(500).json({ ok: false, error: err.message });
@@ -171,7 +220,7 @@ router.post('/status/parser-config', (req, res) => {
 });
 
 // POST /api/status/parser-test
-router.post('/status/parser-test', async (req, res) => {
+router.post('/status/parser-test', authenticateUser, requireRole('writer', 'admin'), async (req, res) => {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   const rawEngine = String(body.engine || body.activeEngine || '').trim().toLowerCase();
   if (!rawEngine || !VALID_ENGINES.has(rawEngine)) {

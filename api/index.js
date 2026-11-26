@@ -10,17 +10,18 @@ async function ensureInitialized() {
   }
   if (!initPromise) {
     initPromise = (async () => {
-      await Promise.allSettled([
-        connectMongo().catch((e) => console.warn('[Vercel DB] Mongo warning:', e.message)),
-        connectPostgres()
-          .then(() => {
-            const { ensureVoiceCatalog } = require('../novel-audio-synthesizer/backend/src/scripts/seedDemos');
-            ensureVoiceCatalog(pool).catch((e) =>
-              console.warn('[Vercel DB] Voice catalog warning:', e.message)
-            );
-          })
-          .catch((e) => console.warn('[Vercel DB] Postgres warning:', e.message)),
+      const results = await Promise.allSettled([
+        connectMongo(),
+        connectPostgres().then(async () => {
+          const { ensureVoiceCatalog } = require('../novel-audio-synthesizer/backend/src/scripts/seedDemos');
+          await ensureVoiceCatalog(pool);
+        }),
       ]);
+      const failures = results.filter((r) => r.status === 'rejected');
+      if (failures.length > 0) {
+        failures.forEach((f) => console.warn('[Vercel DB] Init warning:', f.reason?.message || f.reason));
+        initPromise = null;
+      }
     })();
   }
   await initPromise;
