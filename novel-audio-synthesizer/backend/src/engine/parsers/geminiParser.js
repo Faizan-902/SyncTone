@@ -125,13 +125,6 @@ function normalizeGeminiPayload(rawJson, fallbackTitle = 'Untitled Novel', optio
             : normalizeGenderValue(s.gender || s.speaker_gender || charMeta?.gender, speakerName);
           const genderArg = gender === 'male' || gender === 'female' ? gender : null;
 
-          const resolved = isNarration
-            ? VOICE_PALETTE.narrator
-            : voiceProfiler.resolveCharacterVoice(speakerName, '', genderArg);
-          const voiceId = isNarration
-            ? VOICE_PALETTE.narrator
-            : extractVoiceIdString(resolved, 'en-GB-ThomasNeural');
-
           return {
             order: sIdx + 1,
             segment_id: sIdx + 1,
@@ -141,8 +134,8 @@ function normalizeGeminiPayload(rawJson, fallbackTitle = 'Untitled Novel', optio
             character_id: speakerId,
             gender,
             speaker_gender: gender,
-            voice_id: voiceId,
-            assigned_voice_id: voiceId,
+            voice_id: isNarration ? VOICE_PALETTE.narrator : null,
+            assigned_voice_id: isNarration ? VOICE_PALETTE.narrator : null,
             text: s.text.trim(),
             confidence: typeof s.confidence === 'number' ? Math.min(1, Math.max(0, s.confidence)) : 0.94,
             source: 'gemini_ai',

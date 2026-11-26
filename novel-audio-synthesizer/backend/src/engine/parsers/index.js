@@ -103,7 +103,7 @@ function loadRuntimeParserConfig(options = {}) {
   ollama.url = String(ollama.url || 'http://localhost:11434').replace(/\/+$/, '');
 
   const ocrDefaults = {
-    baseUrl: config.unlimitedOcr?.url || 'http://localhost:8000/v1',
+    baseUrl: config.unlimitedOcr?.baseUrl || config.unlimitedOcr?.url || 'http://localhost:8000/v1',
     model: config.unlimitedOcr?.model || 'baidu/Unlimited-OCR',
   };
   const ocrRaw = {
@@ -943,11 +943,7 @@ async function parseUploadedManuscript(filePath, options = {}) {
     });
     return {
       ...enrichedOllama,
-      parser_engine:
-        enrichedOllama.parser_fallback_reason &&
-        enrichedOllama.chapters.every((c) => !c.segments || c.segments.length === 0)
-          ? 'heuristic'
-          : 'ollama',
+      parser_engine: enrichedOllama.parser_fallback_reason ? 'heuristic' : 'ollama',
     };
   }
 

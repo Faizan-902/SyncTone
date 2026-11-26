@@ -164,11 +164,21 @@ function buildMixedCastPlan(segments = [], characters = []) {
   const plan = new Map();
   const charMetaById = new Map();
 
+  const normalizeSpeakerKey = (val) =>
+    String(val || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+
   for (const c of characters || []) {
     const key = String(c.id || c.character_id || c.name || c.canonical_name || '').trim();
-    if (key) charMetaById.set(key, c);
+    if (key) {
+      charMetaById.set(key, c);
+      charMetaById.set(key.toLowerCase(), c);
+    }
     const nameKey = String(c.name || c.canonical_name || '').toLowerCase().trim();
-    if (nameKey) charMetaById.set(nameKey, c);
+    if (nameKey) {
+      charMetaById.set(nameKey, c);
+      const slug = normalizeSpeakerKey(nameKey);
+      if (slug) charMetaById.set(slug, c);
+    }
   }
 
   // Count lines and collect speaker metadata
@@ -199,7 +209,11 @@ function buildMixedCastPlan(segments = [], characters = []) {
     if (!existing.voiceId && (seg.voice_id || seg.assigned_voice_id)) {
       existing.voiceId = seg.voice_id || seg.assigned_voice_id;
     }
-    const meta = charMetaById.get(key) || charMetaById.get(String(seg.speaker_name || '').toLowerCase().trim());
+    const meta =
+      charMetaById.get(key) ||
+      charMetaById.get(key.toLowerCase()) ||
+      charMetaById.get(normalizeSpeakerKey(key)) ||
+      charMetaById.get(String(seg.speaker_name || '').toLowerCase().trim());
     if (meta) {
       if (meta.voice_id || meta.assigned_voice_id) {
         existing.voiceId = meta.voice_id || meta.assigned_voice_id;
@@ -213,12 +227,21 @@ function buildMixedCastPlan(segments = [], characters = []) {
 
   // Also include characters from roster even if they have 0 segments in this specific slice
   for (const c of characters || []) {
-    const key = String(c.id || c.character_id || c.name || c.canonical_name || '').trim();
-    if (!key || speakerStats.has(key)) continue;
-    const isNarr = String(c.role || c.name || key).toLowerCase() === 'narrator';
+    const isNarr = Boolean(c.is_narrator) || String(c.role || c.name || c.canonical_name || '').toLowerCase().trim() === 'narrator';
+    const rawName = String(c.name || c.canonical_name || c.character_id || c.id || '').trim();
+    const slugKey = normalizeSpeakerKey(rawName);
+    const key = isNarr ? 'narrator' : (slugKey || String(c.character_id || c.id || '').trim());
+    if (
+      !key ||
+      speakerStats.has(key) ||
+      (rawName && speakerStats.has(rawName)) ||
+      (c.id && speakerStats.has(String(c.id)))
+    ) {
+      continue;
+    }
     speakerStats.set(key, {
       key,
-      speakerName: c.name || c.canonical_name || key,
+      speakerName: rawName || key,
       voiceId: c.voice_id || c.assigned_voice_id || '',
       count: Number(c.dialogue_count || c.segment_count || 0),
       firstOrder: 999999,
@@ -444,16 +467,35 @@ function resolveMixedVoiceForCharacter({
   }
 
   // 3. Lookup in precomputed chapter `castPlan` if provided
-  const lookupKeys = [
-    isNarrator ? 'narrator' : '',
-    String(characterId || '').trim(),
-    String(speakerName || '').trim(),
-  ].filter(Boolean);
+  const charIdTrimmed = String(characterId || '').trim();
+  const speakerTrimmed = String(speakerName || '').trim();
+  const normalizeSlug = (v) =>
+    v.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+
+  const lookupKeys = Array.from(
+    new Set(
+      [
+        isNarrator ? 'narrator' : '',
+        charIdTrimmed,
+        charIdTrimmed.toLowerCase(),
+        normalizeSlug(charIdTrimmed),
+        speakerTrimmed,
+        speakerTrimmed.toLowerCase(),
+        normalizeSlug(speakerTrimmed),
+      ].filter(Boolean)
+    )
+  );
 
   if (castPlan instanceof Map) {
     for (const k of lookupKeys) {
       if (castPlan.has(k)) {
         return castPlan.get(k);
+      }
+    }
+    for (const [planKey, planVal] of castPlan.entries()) {
+      const normPlan = normalizeSlug(String(planKey));
+      if (normPlan && lookupKeys.includes(normPlan)) {
+        return planVal;
       }
     }
   }
