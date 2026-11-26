@@ -120,10 +120,11 @@ export default function UploadChapterModal({ isOpen, novel, onClose, onChapterUp
 
           <div className="grid grid-cols-3 gap-3">
             <div className="col-span-2">
-              <label className="block text-[10px] font-mono uppercase tracking-wider mb-1.5 text-[var(--text-sub)]">
+              <label htmlFor="upload-chapter-title" className="block text-[10px] font-mono uppercase tracking-wider mb-1.5 text-[var(--text-sub)]">
                 Chapter Title
               </label>
               <input
+                id="upload-chapter-title"
                 type="text"
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
@@ -132,10 +133,11 @@ export default function UploadChapterModal({ isOpen, novel, onClose, onChapterUp
               />
             </div>
             <div>
-              <label className="block text-[10px] font-mono uppercase tracking-wider mb-1.5 text-[var(--text-sub)]">
+              <label htmlFor="upload-chapter-number" className="block text-[10px] font-mono uppercase tracking-wider mb-1.5 text-[var(--text-sub)]">
                 Number (optional)
               </label>
               <input
+                id="upload-chapter-number"
                 type="number"
                 min="1"
                 value={chapterNumber}
@@ -147,10 +149,11 @@ export default function UploadChapterModal({ isOpen, novel, onClose, onChapterUp
           </div>
 
           <div>
-            <label className="block text-[10px] font-mono uppercase tracking-wider mb-1.5 text-[var(--text-sub)]">
+            <label htmlFor="upload-chapter-text" className="block text-[10px] font-mono uppercase tracking-wider mb-1.5 text-[var(--text-sub)]">
               Chapter Prose Text
             </label>
             <textarea
+              id="upload-chapter-text"
               rows={8}
               value={text}
               onChange={(e) => setText(e.target.value)}

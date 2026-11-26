@@ -298,10 +298,11 @@ export function useVoiceAudition(engine = null) {
       setAuditionError(null);
       setLoadingId(targetKey);
 
-      const resolvedEngine =
-        engine ||
-        (typeof localStorage !== 'undefined' && localStorage.getItem('synctone_tts_engine')) ||
-        'msedge-tts';
+      let savedEngine = null;
+      try {
+        savedEngine = typeof localStorage !== 'undefined' ? localStorage.getItem('synctone_tts_engine') : null;
+      } catch (_) {}
+      const resolvedEngine = engine || savedEngine || 'msedge-tts';
       const sampleText = text || `Testing voice profile for ${speakerName || voiceId}.`;
       const speakUrl = `/api/voices/speak?text=${encodeURIComponent(sampleText)}&voice_id=${encodeURIComponent(voiceId)}&engine=${encodeURIComponent(resolvedEngine)}&character_id=${encodeURIComponent(characterId || voiceId)}&speaker_name=${encodeURIComponent(speakerName || voiceId)}&is_narrator=${Boolean(isNarrator)}&gender=${encodeURIComponent(String(gender || '').toLowerCase())}`;
 
@@ -784,10 +785,31 @@ export default function VoicesView({
         </div>
 
         {/* Navigation Tabs */}
-        <div className="flex items-center gap-2 mt-6 pt-6 border-t border-[var(--border-subtle)] overflow-x-auto no-scrollbar" role="tablist">
+        <div
+          className="flex items-center gap-2 mt-6 pt-6 border-t border-[var(--border-subtle)] overflow-x-auto no-scrollbar"
+          role="tablist"
+          aria-label="Voice studio sections"
+          onKeyDown={(e) => {
+            const tabIds = ['voices', 'cast', 'timbre', 'engines'];
+            const idx = tabIds.indexOf(activeTab);
+            if (idx === -1) return;
+            let nextIdx = idx;
+            if (e.key === 'ArrowRight') nextIdx = (idx + 1) % tabIds.length;
+            else if (e.key === 'ArrowLeft') nextIdx = (idx - 1 + tabIds.length) % tabIds.length;
+            else if (e.key === 'Home') nextIdx = 0;
+            else if (e.key === 'End') nextIdx = tabIds.length - 1;
+            else return;
+            e.preventDefault();
+            const nextTab = tabIds[nextIdx];
+            setActiveTab(nextTab);
+            document.getElementById(`voices-tab-${nextTab}`)?.focus();
+          }}
+        >
           <button
+            id="voices-tab-voices"
             type="button"
             role="tab"
+            tabIndex={activeTab === 'voices' ? 0 : -1}
             aria-selected={activeTab === 'voices'}
             onClick={() => setActiveTab('voices')}
             className={`px-4 py-1.5 text-xs font-mono uppercase tracking-wider rounded-full cursor-pointer transition-all ${
@@ -799,8 +821,10 @@ export default function VoicesView({
             NEURAL VOICES ({NEURAL_VOICES.length})
           </button>
           <button
+            id="voices-tab-cast"
             type="button"
             role="tab"
+            tabIndex={activeTab === 'cast' ? 0 : -1}
             aria-selected={activeTab === 'cast'}
             onClick={() => setActiveTab('cast')}
             className={`px-4 py-1.5 text-xs font-mono uppercase tracking-wider rounded-full cursor-pointer transition-all ${
@@ -812,8 +836,10 @@ export default function VoicesView({
             NOVEL ENSEMBLES ({novels.length})
           </button>
           <button
+            id="voices-tab-timbre"
             type="button"
             role="tab"
+            tabIndex={activeTab === 'timbre' ? 0 : -1}
             aria-selected={activeTab === 'timbre'}
             onClick={() => setActiveTab('timbre')}
             className={`px-4 py-1.5 text-xs font-mono uppercase tracking-wider rounded-full cursor-pointer transition-all ${
@@ -825,8 +851,10 @@ export default function VoicesView({
             TIMBRE & DYNAMICS
           </button>
           <button
+            id="voices-tab-engines"
             type="button"
             role="tab"
+            tabIndex={activeTab === 'engines' ? 0 : -1}
             aria-selected={activeTab === 'engines'}
             onClick={() => setActiveTab('engines')}
             className={`px-4 py-1.5 text-xs font-mono uppercase tracking-wider rounded-full cursor-pointer transition-all ${

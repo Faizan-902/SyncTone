@@ -166,8 +166,9 @@ export function cleanOcrArtifacts(text) {
     .replace(/['"“”‘’*]*\^[A-Za-z0-9_^'"*]*|['"“”‘’*]*[\^_]{2,}[A-Za-z0-9_^'"*]*/g, ' ')
     // 2. Remove isolated punctuation noise patterns (e.g. * ^, `>, |, ^, =)
     .replace(/(?:^|\s)[`>|~^=*\\]+(?:\s+[`>|~^=*\\]+)*(?=\s|$)/g, ' ')
-    // 3. Remove OCR junk symbol clusters like `> * 1 s : i Lx`, `EN /`, `ww ZW =`, `a e 00 pe SE E PN`
-    .replace(/(?:^|\s)(?:[`*^>|~=:\/\\]|\b[a-zA-Z0-9]\b|\b[A-Z]{2,}\b|\b\d+\b)(?:\s+[`*^>|~=:\/\\]|\s+\b[a-zA-Z0-9]\b|\s+\b[A-Z]{2,}\b|\s+\b\d+\b){2,}(?=\s|$)/g, ' ')
+    // 3. Remove OCR junk symbol clusters like `> * 1 s : i Lx`, `EN /`, `ww ZW =`, `a e 00 pe SE E PN` without touching normal uppercase prose
+    .replace(/(?:^|\s)(?:[`*^>|~=:\/\\]+(?:\s+(?:[`*^>|~=:\/\\]+|\b[A-Za-z0-9]{1,3}\b)){1,}|(?:\b[A-Za-z0-9]{1,3}\b\s+){1,}[`*^>|~=:\/\\]+(?:\s+(?:[`*^>|~=:\/\\]+|\b[A-Za-z0-9]{1,3}\b))*)(?=\s|$)/g, ' ')
+    .replace(/(?:^|\s)(?=(?:[^\n]*\b\d{1,2}\b|[a-z]\s+[a-z]\s+))(?:[A-Za-z0-9]{1,2}\s+){3,}[A-Za-z0-9]{1,2}(?=\s|$)/g, ' ')
     // 4. Fix common OCR word glitches & broken apostrophes/contractions like "hadn’ t" -> "hadn’t", "5'ou" -> "you"
     .replace(/\b5'ou\b/g, 'you')
     .replace(/\b([a-zA-Z]+)[’\x27]\s+([a-zA-Z]+)\b/g, '$1’$2')

@@ -93,17 +93,27 @@ export default function CharacterRoster({
     });
 
     setCharacters(list);
+  }, [segments, customCharacters]);
 
-    // Fetch voice palette from real endpoint
+  // Fetch voice palette once on mount with cancellation guard
+  useEffect(() => {
+    let cancelled = false;
     api.voices
       .list()
       .then((data) => {
-        setAvailableVoices(data.available_voices || {});
+        if (!cancelled) {
+          setAvailableVoices(data.available_voices || {});
+        }
       })
       .catch((err) => {
-        console.warn('[CharacterRoster] Failed to load voice catalog:', err.message);
+        if (!cancelled) {
+          console.warn('[CharacterRoster] Failed to load voice catalog:', err.message);
+        }
       });
-  }, [segments, customCharacters]);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const baseVoiceGroups = useMemo(
     () => buildCanonicalVoiceGroups(availableVoices),
@@ -216,7 +226,7 @@ export default function CharacterRoster({
     openerRef.current = document.activeElement;
     if (drawerRef.current) {
       const focusables = drawerRef.current.querySelectorAll(
-        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"]):not([disabled])'
       );
       if (focusables.length > 0) {
         focusables[0].focus();
@@ -237,7 +247,7 @@ export default function CharacterRoster({
         onClose?.();
       } else if (e.key === 'Tab' && drawerRef.current) {
         const focusables = drawerRef.current.querySelectorAll(
-          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"]):not([disabled])'
         );
         if (focusables.length === 0) return;
         const first = focusables[0];
