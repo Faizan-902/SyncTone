@@ -857,6 +857,18 @@ export async function parsePdfWithPdfJs(file, uploadAssetFn) {
   });
 
   const pdfDoc = await loadingTask.promise;
+  try {
+    return await extractPdfDocumentData(pdfDoc, file, uploadAssetFn);
+  } finally {
+    if (typeof pdfDoc?.destroy === 'function') {
+      try {
+        await pdfDoc.destroy();
+      } catch (_) {}
+    }
+  }
+}
+
+async function extractPdfDocumentData(pdfDoc, file, uploadAssetFn) {
 
   let title = '';
   let synopsis = '';

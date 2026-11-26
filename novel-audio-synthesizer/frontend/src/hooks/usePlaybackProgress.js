@@ -42,7 +42,9 @@ export function usePlaybackProgress({
       const currentMs =
         overrideMs !== null
           ? overrideMs
-          : Math.round(currentAudioSync?.audioRef?.current?.currentTime * 1000 || currentAudioSync?.currentTimeMs || 0);
+          : currentAudioSync?.playbackMode === 'studio' && currentAudioSync?.audioRef?.current
+            ? Math.round((currentAudioSync.audioRef.current.currentTime || 0) * 1000)
+            : Math.round(currentAudioSync?.currentTimeMs || 0);
 
       const now = Date.now();
       const timeSinceLastSave = now - lastSavedTimeRef.current;
@@ -100,10 +102,14 @@ export function usePlaybackProgress({
           lastSavedPositionMsRef.current = prog.position_ms;
           setResumedAtMs(prog.position_ms);
 
-          if (audioSyncRef.current?.audioRef?.current) {
-            audioSyncRef.current.seekToTimeMs(prog.position_ms, false);
+          const canSeekNow =
+            audioSyncRef.current?.playbackMode === 'tts'
+              ? timeline.length > 0
+              : Boolean(audioSyncRef.current?.audioRef?.current);
+          if (canSeekNow) {
+            audioSyncRef.current?.seekToTimeMs(prog.position_ms, false);
           } else {
-            // Audio ref not yet mounted: stash for deferred execution
+            // Audio element or timeline not yet ready: stash for deferred execution
             pendingResumeMsRef.current = prog.position_ms;
           }
         }
@@ -120,16 +126,21 @@ export function usePlaybackProgress({
     return () => {
       isMounted = false;
     };
-  }, [isValidNovel, isValidChapter, isAuthenticated, novelId, chapterId, user?.id]);
+  }, [isValidNovel, isValidChapter, isAuthenticated, novelId, chapterId, user?.id, timeline.length]);
 
-  // Apply pending deferred seek as soon as the audio element mounts and is ready
+  // Apply pending deferred seek as soon as the audio element or TTS timeline is ready
   useEffect(() => {
-    if (pendingResumeMsRef.current && audioSync?.audioRef?.current) {
+    if (!pendingResumeMsRef.current) return;
+    const isReady =
+      audioSync?.playbackMode === 'tts'
+        ? timeline.length > 0
+        : Boolean(audioSync?.audioRef?.current);
+    if (isReady) {
       const target = pendingResumeMsRef.current;
       pendingResumeMsRef.current = null;
       audioSync.seekToTimeMs(target, false);
     }
-  }, [audioSync?.audioRef?.current, audioSync?.duration]);
+  }, [audioSync?.audioRef?.current, audioSync?.duration, audioSync?.playbackMode, timeline.length]);
 
   // 3. Periodic timer to save progress every 8 seconds while playing
   useEffect(() => {

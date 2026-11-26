@@ -46,6 +46,7 @@ class PersistentWorker {
       const spawnArgs = this.spawnArgsGetter();
 
       if (!spawnArgs) {
+        this.readyPromise = null;
         return reject(new Error(`[WorkerPool:${this.name}] Configuration not available to spawn worker`));
       }
 
@@ -53,6 +54,9 @@ class PersistentWorker {
         this.process = spawn(pythonBin, spawnArgs, {
           stdio: ['pipe', 'pipe', 'inherit'],
         });
+        if (this.process.stdin) {
+          this.process.stdin.on('error', () => {});
+        }
 
         this.rl = readline.createInterface({
           input: this.process.stdout,
@@ -62,6 +66,8 @@ class PersistentWorker {
         const initTimeout = setTimeout(() => {
           if (!this.ready) {
             this.kill();
+            this.shuttingDown = false;
+            this.readyPromise = null;
             reject(new Error(`[WorkerPool:${this.name}] Daemon startup timed out after 15s`));
           }
         }, 15000);
@@ -109,6 +115,7 @@ class PersistentWorker {
           if (!this.ready) reject(err);
         });
       } catch (err) {
+        this.readyPromise = null;
         reject(err);
       }
     });
@@ -130,6 +137,9 @@ class PersistentWorker {
 
   async sendRequest(payload, timeoutMs = 90000) {
     await this.start();
+    if (!this.process || !this.process.stdin || this.process.stdin.destroyed) {
+      throw new Error(`[WorkerPool:${this.name}] Worker process stdin is unavailable`);
+    }
 
     const id = ++this.reqSeq;
     return new Promise((resolve, reject) => {
@@ -142,14 +152,20 @@ class PersistentWorker {
 
       this.pending.set(id, { resolve, reject, timeout });
 
-      const line = JSON.stringify({ ...payload, id }) + '\n';
-      this.process.stdin.write(line, (err) => {
-        if (err) {
-          clearTimeout(timeout);
-          this.pending.delete(id);
-          reject(err);
-        }
-      });
+      try {
+        const line = JSON.stringify({ ...payload, id }) + '\n';
+        this.process.stdin.write(line, (err) => {
+          if (err) {
+            clearTimeout(timeout);
+            this.pending.delete(id);
+            reject(err);
+          }
+        });
+      } catch (writeErr) {
+        clearTimeout(timeout);
+        this.pending.delete(id);
+        reject(writeErr);
+      }
     });
   }
 

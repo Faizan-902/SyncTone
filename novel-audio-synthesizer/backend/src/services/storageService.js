@@ -403,6 +403,28 @@ async function getObjectStream({ bucketType = 'audio', key, range }) {
   }
 }
 
+function pipeStreamSafe(stream, res, onStreamError = null) {
+  if (!stream || !res) return;
+  const cleanup = () => {
+    if (typeof stream.destroy === 'function' && !stream.destroyed) {
+      stream.destroy();
+    }
+  };
+  res.on('close', cleanup);
+  stream.on('error', (err) => {
+    console.warn('[Storage Stream Error]:', err.message);
+    if (typeof onStreamError === 'function') {
+      onStreamError(err);
+    } else if (!res.headersSent) {
+      res.status(500).json({ error: 'Stream read failure.' });
+    } else if (!res.writableEnded) {
+      res.end();
+    }
+    cleanup();
+  });
+  stream.pipe(res);
+}
+
 const storageService = {
   isMongoStorageConfigured,
   isS3Configured,
@@ -410,8 +432,12 @@ const storageService = {
   objectExists,
   getObjectStream,
   getPublicUrl,
+  parseByteRange,
+  pipeStreamSafe,
 };
 
 module.exports = {
   storageService,
+  parseByteRange,
+  pipeStreamSafe,
 };

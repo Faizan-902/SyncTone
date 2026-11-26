@@ -9,6 +9,14 @@ const STORAGE_FONT_SIZE_KEY = 'synctone_font_size';
 
 const THEME_CYCLE = ['dark', 'light'];
 
+const safeGetStorage = (key) => {
+  try {
+    return typeof localStorage !== 'undefined' ? localStorage.getItem(key) : null;
+  } catch (_) {
+    return null;
+  }
+};
+
 export function ThemeProvider({ children }) {
   const [theme, setThemeState] = useState(() => {
     if (typeof window !== 'undefined') {
@@ -16,7 +24,7 @@ export function ThemeProvider({ children }) {
       const urlTheme = urlParams.get('theme');
       if (urlTheme === 'dark' || urlTheme === 'light') return urlTheme;
 
-      const saved = localStorage.getItem(STORAGE_THEME_KEY);
+      const saved = safeGetStorage(STORAGE_THEME_KEY);
       // Migrate legacy "sepia" to "dark" silently (no flash)
       if (saved === 'sepia') {
         try { localStorage.setItem(STORAGE_THEME_KEY, 'dark'); } catch (_) {}
@@ -29,7 +37,7 @@ export function ThemeProvider({ children }) {
 
   const [fontFamily, setFontFamilyState] = useState(() => {
     if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem(STORAGE_FONT_KEY);
+      const saved = safeGetStorage(STORAGE_FONT_KEY);
       if (saved === 'sans' || saved === 'serif') return saved;
     }
     return 'serif';
@@ -37,7 +45,7 @@ export function ThemeProvider({ children }) {
 
   const [fontSize, setFontSizeState] = useState(() => {
     if (typeof window !== 'undefined') {
-      const saved = parseInt(localStorage.getItem(STORAGE_FONT_SIZE_KEY), 10);
+      const saved = parseInt(safeGetStorage(STORAGE_FONT_SIZE_KEY), 10);
       if (!isNaN(saved) && saved >= 14 && saved <= 24) return saved;
     }
     return 16;
@@ -78,17 +86,25 @@ export function ThemeProvider({ children }) {
     });
   }, []);
 
-  const setFontFamily = useCallback((newFont) => {
-    if (newFont === 'sans' || newFont === 'serif') {
-      setFontFamilyState(newFont);
+  const setFontFamily = useCallback((updater) => {
+    setFontFamilyState((prev) => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      if (next !== 'sans' && next !== 'serif') return prev;
       try {
-        localStorage.setItem(STORAGE_FONT_KEY, newFont);
+        localStorage.setItem(STORAGE_FONT_KEY, next);
       } catch (_) {}
-    }
+      return next;
+    });
   }, []);
 
   const toggleFontFamily = useCallback(() => {
-    setFontFamilyState((prev) => (prev === 'sans' ? 'serif' : 'sans'));
+    setFontFamilyState((prev) => {
+      const next = prev === 'sans' ? 'serif' : 'sans';
+      try {
+        localStorage.setItem(STORAGE_FONT_KEY, next);
+      } catch (_) {}
+      return next;
+    });
   }, []);
 
   const setFontSize = useCallback((updater) => {

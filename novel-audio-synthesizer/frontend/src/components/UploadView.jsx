@@ -400,12 +400,15 @@ export default function UploadView({
 
   const baseVoiceGroups = useMemo(() => buildCanonicalVoiceGroups({}), []);
 
+  const processFileRef = useRef(processFile);
+  processFileRef.current = processFile;
+
   const handleDrop = useCallback((e) => {
     e.preventDefault();
     e.stopPropagation();
     setDragActive(false);
     if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      processFile(e.dataTransfer.files[0]);
+      processFileRef.current?.(e.dataTransfer.files[0]);
     }
   }, []);
 
@@ -646,10 +649,11 @@ export default function UploadView({
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
           <div className="space-y-1.5">
-            <label className="text-xs font-mono uppercase text-[var(--text-sub)]">
+            <label htmlFor="upload-novel-title" className="text-xs font-mono uppercase text-[var(--text-sub)]">
               Novel Title *
             </label>
             <input
+              id="upload-novel-title"
               type="text"
               required
               value={title}
@@ -701,10 +705,11 @@ export default function UploadView({
         </div>
 
         <div className="space-y-1.5">
-          <label className="text-xs font-mono uppercase text-[var(--text-sub)]">
+          <label htmlFor="upload-novel-synopsis" className="text-xs font-mono uppercase text-[var(--text-sub)]">
             Synopsis / Editorial Blurb
           </label>
           <textarea
+            id="upload-novel-synopsis"
             rows={3}
             value={synopsis}
             onChange={(e) => setSynopsis(e.target.value)}
@@ -777,10 +782,11 @@ export default function UploadView({
 
         <div className="grid grid-cols-1 md:grid-cols-12 gap-5">
           <div className="space-y-1.5 md:col-span-4">
-            <label className="text-xs font-mono uppercase text-[var(--text-sub)] whitespace-nowrap">
+            <label htmlFor="upload-channel-select" className="text-xs font-mono uppercase text-[var(--text-sub)] whitespace-nowrap">
               Catalog Channel
             </label>
             <select
+              id="upload-channel-select"
               value={channel}
               onChange={(e) => setChannel(e.target.value)}
               className="w-full h-[42px] px-3.5 rounded-xl bg-[var(--bg-surface)] border border-[var(--border-subtle)] text-sm text-[var(--text-main)] focus:outline-none focus:border-[var(--text-main)] font-mono truncate"

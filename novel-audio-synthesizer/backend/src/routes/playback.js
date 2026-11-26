@@ -24,6 +24,17 @@ router.post('/playback/progress', optionalAuth, async (req, res) => {
       return res.status(400).json({ error: 'Invalid UUID format for user_id, novel_id, or chapter_id' });
     }
 
+    const parsedSegmentOrder = Number(segment_order);
+    const parsedPositionMs = Number(position_ms);
+    if (
+      !Number.isInteger(parsedSegmentOrder) ||
+      parsedSegmentOrder < 0 ||
+      !Number.isInteger(parsedPositionMs) ||
+      parsedPositionMs < 0
+    ) {
+      return res.status(400).json({ error: 'segment_order and position_ms must be non-negative integers' });
+    }
+
     client = await pool.connect();
     await client.query('BEGIN');
 
@@ -52,7 +63,7 @@ router.post('/playback/progress', optionalAuth, async (req, res) => {
         updated_at = now()
       RETURNING chapter_id, segment_order, position_ms, updated_at;
     `,
-      [historyRow.id, chapter_id, segment_order, position_ms]
+      [historyRow.id, chapter_id, parsedSegmentOrder, parsedPositionMs]
     );
     const posRow = positionRes.rows[0];
 
@@ -72,6 +83,9 @@ router.post('/playback/progress', optionalAuth, async (req, res) => {
   } catch (err) {
     if (client) {
       await client.query('ROLLBACK').catch(() => {});
+    }
+    if (err.code === '23503' || err.code === '23514' || err.code === 'P0001') {
+      return res.status(400).json({ error: err.message || 'Invalid playback reference' });
     }
     console.error('[Playback] Error updating progress:', err.message);
     return res.status(500).json({ error: 'Failed to update playback progress' });

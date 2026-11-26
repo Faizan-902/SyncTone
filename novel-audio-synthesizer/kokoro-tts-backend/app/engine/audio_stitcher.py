@@ -44,8 +44,12 @@ class AudioStitcher:
         sample_rate: Optional[int] = None,
         inter_speaker_pause_ms: Optional[int] = None,
     ):
-        self.sample_rate = sample_rate or settings.sample_rate
-        self.pause_ms = inter_speaker_pause_ms or settings.inter_speaker_pause_ms
+        self.sample_rate = sample_rate if sample_rate is not None else settings.sample_rate
+        self.pause_ms = (
+            settings.inter_speaker_pause_ms
+            if inter_speaker_pause_ms is None
+            else inter_speaker_pause_ms
+        )
         self._has_ffmpeg = _check_ffmpeg()
         if not self._has_ffmpeg:
             logger.warning(
@@ -76,6 +80,8 @@ class AudioStitcher:
             PlaybackManifest with timeline and audio URL.
         """
         output_dir.mkdir(parents=True, exist_ok=True)
+        safe_chapter_id = re.sub(r"[^a-zA-Z0-9._-]", "_", Path(str(chapter_id or "chapter")).name)
+        resolved_dir = output_dir.resolve()
 
         timeline: list[TimelineEntry] = []
         all_samples: list[np.ndarray] = []
@@ -117,17 +123,20 @@ class AudioStitcher:
             combined = np.concatenate(all_samples)
         else:
             combined = np.zeros(self.sample_rate, dtype=np.float32)  # 1s silence
+            current_ms = 1000
 
         # Write WAV first (always needed as intermediate)
-        wav_path = output_dir / f"{chapter_id}.wav"
+        wav_path = (output_dir / f"{safe_chapter_id}.wav").resolve()
+        if not str(wav_path).startswith(str(resolved_dir)):
+            raise ValueError("Invalid chapter_id output path")
         self._write_wav(combined, wav_path)
 
         # Encode to target format
-        audio_url = f"/static/audio/{chapter_id}.wav"
+        audio_url = f"/static/audio/{safe_chapter_id}.wav"
         final_format = AudioFormat.WAV
 
         if output_format != AudioFormat.WAV and self._has_ffmpeg:
-            encoded_path = self._encode(wav_path, output_dir, chapter_id, output_format)
+            encoded_path = self._encode(wav_path, output_dir, safe_chapter_id, output_format)
             if encoded_path:
                 audio_url = f"/static/audio/{encoded_path.name}"
                 final_format = output_format
@@ -140,7 +149,7 @@ class AudioStitcher:
         )
 
         return PlaybackManifest(
-            chapter_id=chapter_id,
+            chapter_id=safe_chapter_id,
             audio_stream_url=audio_url,
             audio_format=final_format,
             total_duration_ms=current_ms,

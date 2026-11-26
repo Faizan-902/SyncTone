@@ -3,6 +3,7 @@ const { voiceProfiler, VOICE_PALETTE } = require('../engine/voiceProfiler');
 const { ttsEngine, VALID_KOKORO_VOICES } = require('../engine/ttsEngine');
 const { audioStitcher } = require('../engine/audioStitcher');
 const { optionalAuth } = require('../middleware/auth');
+const { parseByteRange } = require('../services/storageService');
 
 const router = Router();
 
@@ -132,15 +133,12 @@ function sendAudioBuffer(req, res, buffer, mimeType, engine, voice) {
 
   const range = req.headers.range;
   if (range) {
-    const parts = range.replace(/bytes=/, '').split('-');
-    const start = parseInt(parts[0], 10);
-    const end = parts[1] ? parseInt(parts[1], 10) : buffer.length - 1;
-
-    if (isNaN(start) || start >= buffer.length || end < start) {
+    const parsedRange = parseByteRange(range, buffer.length);
+    if (!parsedRange || parsedRange.invalid) {
       res.status(416).set('Content-Range', `bytes */${buffer.length}`);
       return res.end();
     }
-
+    const { start, end } = parsedRange;
     const chunk = buffer.slice(start, end + 1);
     res.status(206).set({
       'Content-Range': `bytes ${start}-${end}/${buffer.length}`,
@@ -187,7 +185,8 @@ async function handleSpeak(req, res) {
       cleanText = ' ';
     }
 
-    const cacheKey = `${engine}:${voice_id}:${characterId}:${speakerName}:${isNarrator}:${castSlot ?? ''}:${speed}:${cleanText}`;
+    const explicitVoice = req.query.explicit_voice === 'true' || req.body?.explicit_voice === true;
+    const cacheKey = `${engine}:${voice_id}:${novel_id}:${chapter_id}:${characterId}:${speakerName}:${isNarrator}:${castSlot ?? ''}:${explicitVoice}:${speed}:${cleanText}`;
     if (speakCache.has(cacheKey)) {
       if (clientDisconnected || res.writableEnded || res.destroyed) {
         return;
@@ -206,7 +205,6 @@ async function handleSpeak(req, res) {
       return;
     }
 
-    const explicitVoice = req.query.explicit_voice === 'true' || req.body?.explicit_voice === true;
     const result = await ttsEngine.synthesizeSegment(cleanText, String(voice_id), speed, String(engine), {
       characterId,
       speakerName,
@@ -424,19 +422,21 @@ router.post('/voices/assign', optionalAuth, async (req, res) => {
 
     const runPgUpdate = async (voiceToSet) => {
       if (isUuid) {
-        await pool.query(
-          'UPDATE characters SET voice_id = $1, updated_at = now() WHERE id = $2::uuid',
-          [voiceToSet, character_id]
-        );
+        if (targetNovelId) {
+          await pool.query(
+            'UPDATE characters SET voice_id = $1, updated_at = now() WHERE id = $2::uuid AND novel_id = $3::uuid',
+            [voiceToSet, character_id, targetNovelId]
+          );
+        } else {
+          await pool.query(
+            'UPDATE characters SET voice_id = $1, updated_at = now() WHERE id = $2::uuid',
+            [voiceToSet, character_id]
+          );
+        }
       } else if (targetNovelId) {
         await pool.query(
           `UPDATE characters SET voice_id = $1, updated_at = now() WHERE novel_id = $3 AND ${pgSlugMatchSql}`,
           [voiceToSet, character_id, targetNovelId]
-        );
-      } else {
-        await pool.query(
-          `UPDATE characters SET voice_id = $1, updated_at = now() WHERE ${pgSlugMatchSql}`,
-          [voiceToSet, character_id]
         );
       }
     };

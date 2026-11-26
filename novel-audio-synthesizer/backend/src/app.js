@@ -11,7 +11,7 @@ const statusRouter = require('./routes/status');
 const swiftRouter = require('./routes/swift');
 const playbackRouter = require('./routes/playback');
 const { config } = require('./config');
-const { storageService } = require('./services/storageService');
+const { storageService, pipeStreamSafe } = require('./services/storageService');
 
 function isAllowedCorsOrigin(origin) {
   if (!origin) return true;
@@ -88,7 +88,7 @@ function createApp() {
               lower.endsWith('.png') ? 'image/png' : lower.endsWith('.webp') ? 'image/webp' : 'image/jpeg'
             );
           }
-          return s3Obj.stream.pipe(res);
+          return pipeStreamSafe(s3Obj.stream, res);
         }
       }
       if (process.env.VERCEL) {

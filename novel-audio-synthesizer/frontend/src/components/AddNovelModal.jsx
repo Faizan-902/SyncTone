@@ -803,10 +803,11 @@ export default function AddNovelModal({
 
           {/* Novel Title Input */}
           <div>
-            <label className="block text-xs font-semibold theme-sub uppercase tracking-wider mb-1.5 font-mono">
+            <label htmlFor="novel-modal-title" className="block text-xs font-semibold theme-sub uppercase tracking-wider mb-1.5 font-mono">
               Novel Title
             </label>
             <input
+              id="novel-modal-title"
               type="text"
               value={title}
               onChange={(e) => setTitle(e.target.value)}
@@ -835,10 +836,11 @@ export default function AddNovelModal({
 
           {/* Global Tone / Genre Input */}
           <div>
-            <label className="block text-xs font-semibold theme-sub uppercase tracking-wider mb-1.5 font-mono">
+            <label htmlFor="novel-modal-tone" className="block text-xs font-semibold theme-sub uppercase tracking-wider mb-1.5 font-mono">
               Global Tone / Genre
             </label>
             <input
+              id="novel-modal-tone"
               type="text"
               value={globalTone}
               onChange={(e) => setGlobalTone(e.target.value)}
@@ -849,10 +851,11 @@ export default function AddNovelModal({
 
           {/* Synopsis Textarea */}
           <div>
-            <label className="block text-xs font-semibold theme-sub uppercase tracking-wider mb-1.5 font-mono">
+            <label htmlFor="novel-modal-synopsis" className="block text-xs font-semibold theme-sub uppercase tracking-wider mb-1.5 font-mono">
               Synopsis
             </label>
             <textarea
+              id="novel-modal-synopsis"
               rows={3}
               value={synopsis}
               onChange={(e) => setSynopsis(e.target.value)}
@@ -864,7 +867,7 @@ export default function AddNovelModal({
           {/* Paste Manuscript Text + Parse & Detect Characters */}
           <div className="space-y-2">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <label className="block text-xs font-semibold theme-sub uppercase tracking-wider font-mono">
+              <label htmlFor="novel-modal-pasted-text" className="block text-xs font-semibold theme-sub uppercase tracking-wider font-mono">
                 Paste Manuscript Text (Optional)
               </label>
               <button
@@ -882,6 +885,7 @@ export default function AddNovelModal({
               </button>
             </div>
             <textarea
+              id="novel-modal-pasted-text"
               rows={4}
               value={pastedText}
               onChange={(e) => setPastedText(e.target.value)}

@@ -9,7 +9,8 @@ const { Chapter } = require('../models');
 const { parseChapter } = require('../engine/textParser');
 const { voiceProfiler } = require('../engine/voiceProfiler');
 const { parseUploadedManuscript } = require('../engine/parsers');
-const { optionalAuth } = require('../middleware/auth');
+const { authenticateUser, optionalAuth } = require('../middleware/auth');
+const { config } = require('../config');
 const { storageService } = require('../services/storageService');
 const statusRouter = require('./status');
 const chaptersRouter = require('./chapters');
@@ -113,6 +114,9 @@ router.post('/novels/parse-file', upload.single('file'), async (req, res) => {
   let tmpPath = null;
   let shouldUnlink = false;
   if (activeParseJobs >= MAX_CONCURRENT_PARSE_JOBS) {
+    if (req.file?.path && fs.existsSync(req.file.path)) {
+      try { fs.unlinkSync(req.file.path); } catch (_) {}
+    }
     return res.status(429).json({
       error: 'The server is currently parsing other uploaded books. Please wait a moment and retry.',
     });
@@ -161,14 +165,24 @@ router.post('/novels/parse-file', upload.single('file'), async (req, res) => {
     const venvPython = path.resolve(__dirname, '../../../kokoro-tts-backend/.venv/bin/python');
     const pythonBin = fs.existsSync(venvPython) ? venvPython : 'python3';
 
-    const runLocalExtractor = async (targetPath) => {
-      const pyOutput = child_process.execFileSync(pythonBin, [scriptPath, targetPath, originalName], {
-        maxBuffer: 50 * 1024 * 1024,
-        timeout: 60000,
-        encoding: 'utf-8',
+    const runLocalExtractor = (targetPath) =>
+      new Promise((resolve, reject) => {
+        child_process.execFile(
+          pythonBin,
+          [scriptPath, targetPath, originalName],
+          { maxBuffer: 50 * 1024 * 1024, timeout: 60000, encoding: 'utf-8' },
+          (err, stdout, stderr) => {
+            if (err) {
+              return reject(new Error(stderr?.trim() || err.message));
+            }
+            try {
+              return resolve(JSON.parse(stdout));
+            } catch (parseErr) {
+              return reject(parseErr);
+            }
+          }
+        );
       });
-      return JSON.parse(pyOutput);
-    };
 
     const parsed = await parseUploadedManuscript(tmpPath, {
       parserEngine,
@@ -216,39 +230,48 @@ router.post('/novels/parse-file', upload.single('file'), async (req, res) => {
  * Saves an extracted cover image or rendered PDF page canvas to /static/covers/
  * and returns a short relative URL (< 255 chars) safe for PostgreSQL novels.cover_object.
  */
+const ALLOWED_IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp']);
+
 router.post('/novels/upload-asset', upload.single('file'), async (req, res) => {
   try {
-    const coversDirs = [
-      path.resolve(__dirname, '../../output/covers'),
-      path.resolve(__dirname, '../../../output/covers'),
-    ];
-    for (const dir of coversDirs) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
+    const coversDirs = Array.from(
+      new Set([
+        path.join(config.paths.outputDir, 'covers'),
+        path.resolve(__dirname, '../../output/covers'),
+        path.resolve(__dirname, '../../../output/covers'),
+      ])
+    );
 
     let ext = '.jpg';
     let buffer = null;
     if (req.file) {
-      ext = path.extname(req.file.originalname || '') || '.jpg';
+      const rawExt = path.extname(req.file.originalname || '').toLowerCase();
+      if (rawExt && !ALLOWED_IMAGE_EXTS.has(rawExt)) {
+        try { fs.unlinkSync(req.file.path); } catch (_) {}
+        return res.status(400).json({ error: 'Only .jpg, .jpeg, .png, or .webp image files are allowed.' });
+      }
+      ext = rawExt === '.jpeg' ? '.jpg' : (rawExt || '.jpg');
       buffer = fs.readFileSync(req.file.path);
       try {
         fs.unlinkSync(req.file.path);
       } catch (_) {}
     } else if (req.body && req.body.data_url) {
-      const m = String(req.body.data_url).match(/^data:image\/([a-zA-Z0-9+]+);base64,(.+)$/);
+      const m = String(req.body.data_url).match(/^data:image\/(jpeg|jpg|png|webp);base64,(.+)$/i);
       if (m) {
-        ext = m[1] === 'png' ? '.png' : m[1] === 'webp' ? '.webp' : '.jpg';
+        const fmt = m[1].toLowerCase();
+        ext = fmt === 'png' ? '.png' : fmt === 'webp' ? '.webp' : '.jpg';
         buffer = Buffer.from(m[2], 'base64');
       }
     }
 
-    if (!buffer) {
-      return res.status(400).json({ error: 'Valid image file or data_url is required.' });
+    if (!buffer || buffer.length === 0) {
+      return res.status(400).json({ error: 'Valid image file (jpg, png, webp) or data_url is required.' });
     }
 
     const fileName = `asset_${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`;
     for (const dir of coversDirs) {
       try {
+        fs.mkdirSync(dir, { recursive: true });
         fs.writeFileSync(path.join(dir, fileName), buffer);
       } catch (_) {}
     }
@@ -344,6 +367,7 @@ router.post('/novels', optionalAuth, async (req, res) => {
     }
 
     const client = await pool.connect();
+    let createdNovel = null;
     try {
       await client.query('BEGIN');
 
@@ -368,7 +392,7 @@ router.post('/novels', optionalAuth, async (req, res) => {
         cover_object,
       ]);
 
-      const createdNovel = result.rows[0];
+      createdNovel = result.rows[0];
 
       // Enqueue profile_novel job into synthesis_jobs and novel_profile_job_targets within the same transaction
       const jobRes = await client.query(
@@ -615,26 +639,29 @@ router.post('/novels', optionalAuth, async (req, res) => {
           );
           const pgChapter = chRes.rows[0];
 
-          // Insert into MongoDB Chapter model
-          try {
-            const mongoDoc = new Chapter({
-              pg_chapter_id: pgChapter.id,
-              novel_id: createdNovel.id,
-              chapter_number: chNum,
-              title: chTitle,
-              raw_text: rawText,
-              audio_version: 1,
-              manifest: {
-                total_duration_ms: totalDurationMs,
-                audio_url: `/api/stream/${pgChapter.id}`,
-                timeline,
-              },
-              segments: mappedSegments,
-            });
-            await mongoDoc.save();
-          } catch (mErr) {
-            console.warn(`[Novels] Could not save chapter ${chNum} to MongoDB:`, mErr.message);
-          }
+          // Insert into MongoDB Chapter model (fail & rollback PG transaction if Mongo save fails)
+          const nonEmptySegments = mappedSegments.filter(
+            (s) => s && typeof s.text === 'string' && s.text.trim().length > 0
+          );
+          const safeRawText =
+            (rawText && String(rawText).trim()) ||
+            nonEmptySegments.map((s) => s.text.trim()).join('\n\n') ||
+            chTitle;
+          const mongoDoc = new Chapter({
+            pg_chapter_id: pgChapter.id,
+            novel_id: createdNovel.id,
+            chapter_number: chNum,
+            title: chTitle,
+            raw_text: safeRawText,
+            audio_version: 1,
+            manifest: {
+              total_duration_ms: totalDurationMs,
+              audio_url: `/api/stream/${pgChapter.id}`,
+              timeline,
+            },
+            segments: nonEmptySegments,
+          });
+          await mongoDoc.save();
 
           createdChapters.push(pgChapter);
         }
@@ -688,6 +715,9 @@ router.post('/novels', optionalAuth, async (req, res) => {
       });
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
+      if (createdNovel?.id) {
+        await Chapter.deleteMany({ novel_id: createdNovel.id }).catch(() => {});
+      }
       throw err;
     } finally {
       client.release();
@@ -804,11 +834,20 @@ router.get('/novels/:id', async (req, res) => {
  * PATCH /api/novels/:id
  * Updates specific novel metadata fields: cover_object, title, synopsis, global_tone, channel.
  */
-router.patch('/novels/:id', optionalAuth, async (req, res) => {
+router.patch('/novels/:id', authenticateUser, async (req, res) => {
   try {
     const { id } = req.params;
     if (!id || !UUID_REGEX.test(id)) {
       return res.status(400).json({ error: 'Invalid novel UUID format.' });
+    }
+
+    const existingRes = await pool.query('SELECT id, added_by FROM novels WHERE id = $1', [id]);
+    if (existingRes.rows.length === 0) {
+      return res.status(404).json({ error: 'Novel not found.' });
+    }
+    const existingNovel = existingRes.rows[0];
+    if (req.user.role !== 'admin' && existingNovel.added_by !== req.user.id) {
+      return res.status(403).json({ error: 'Forbidden: you do not have permission to modify this novel.' });
     }
 
     const { cover_object, title, synopsis, global_tone, channel } = req.body || {};
@@ -839,6 +878,9 @@ router.patch('/novels/:id', optionalAuth, async (req, res) => {
         return res.status(400).json({
           error: `Invalid channel. Allowed values: ${ALLOWED_CHANNELS.join(', ')}.`,
         });
+      }
+      if (normalizedChannel === 'verified' && req.user.role === 'reader') {
+        return res.status(403).json({ error: 'Forbidden: readers cannot promote a novel to verified.' });
       }
       fields.push(`channel = $${idx++}`);
       values.push(normalizedChannel);

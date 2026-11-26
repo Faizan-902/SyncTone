@@ -41,7 +41,7 @@ class AudioStitcher {
     const frame = Buffer.alloc(144, 0);
     frame[0] = 0xff;
     frame[1] = 0xf3;
-    frame[2] = 0x60; // 48 kbps index (0110) MPEG-2 Layer 3, 24kHz = 144 bytes per frame
+    frame[2] = 0x64; // 48 kbps (0110), 24kHz (01) MPEG-2 Layer 3 = 144 bytes per frame
     frame[3] = 0xc0;
     const frames = [];
     for (let i = 0; i < frameCount; i++) {
@@ -131,7 +131,8 @@ class AudioStitcher {
 
     let finalAudioBuffer;
     let audioFormat = targetFormat;
-    let outputFilename = `${chapterId}.${audioFormat}`;
+    const safeChapterId = path.basename(String(chapterId || 'chapter')).replace(/[^a-zA-Z0-9._-]/g, '_');
+    let outputFilename = `${safeChapterId}.${audioFormat}`;
 
     if (audioFormat === 'mp3') {
       finalAudioBuffer = Buffer.concat(audioChunks);
@@ -141,13 +142,17 @@ class AudioStitcher {
       finalAudioBuffer = Buffer.concat([wavHeader, allPcm]);
     }
 
-    const audioFilePath = path.join(outputDir, outputFilename);
+    const resolvedOutputDir = path.resolve(outputDir);
+    const audioFilePath = path.resolve(resolvedOutputDir, outputFilename);
+    if (!audioFilePath.startsWith(resolvedOutputDir + path.sep)) {
+      throw new Error('Invalid chapterId output path');
+    }
     fs.writeFileSync(audioFilePath, finalAudioBuffer);
 
     return {
-      chapter_id: chapterId,
-      audio_stream_url: `/api/stream/${chapterId}`,
-      audio_url: `/api/stream/${chapterId}`,
+      chapter_id: safeChapterId,
+      audio_stream_url: `/api/stream/${safeChapterId}`,
+      audio_url: `/api/stream/${safeChapterId}`,
       audio_format: audioFormat,
       total_duration_ms: currentMs,
       timeline,

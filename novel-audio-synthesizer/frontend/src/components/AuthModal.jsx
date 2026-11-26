@@ -53,7 +53,6 @@ export default function AuthModal({ isOpen, onClose, initialMode = 'login' }) {
   const [githubPanelOpen, setGithubPanelOpen] = useState(false);
   const [githubUsername, setGithubUsername] = useState('');
   const [githubToken, setGithubToken] = useState('');
-  const [showGithubTokenInput, setShowGithubTokenInput] = useState(false);
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -257,8 +256,8 @@ export default function AuthModal({ isOpen, onClose, initialMode = 'login' }) {
     clearError?.();
     const trimmedHandle = githubUsername.trim();
     const trimmedToken = githubToken.trim();
-    if (!trimmedHandle && !trimmedToken) {
-      setValidationError('Enter your GitHub username (e.g. octocat) to continue.');
+    if (!trimmedToken) {
+      setValidationError('Enter a GitHub Personal Access Token (read:user / user:email) to verify your account.');
       return;
     }
     setIsSubmitting(true);
@@ -369,23 +368,18 @@ export default function AuthModal({ isOpen, onClose, initialMode = 'login' }) {
                     </div>
 
                     <div>
-                      <button
-                        type="button"
-                        onClick={() => setShowGithubTokenInput((p) => !p)}
-                        className="text-[11px] font-mono theme-muted hover:text-[var(--text-main)] underline cursor-pointer"
-                      >
-                        {showGithubTokenInput ? 'Hide Personal Access Token' : 'Optional: verify via GitHub Personal Access Token'}
-                      </button>
-                      {showGithubTokenInput && (
-                        <input
-                          type="password"
-                          value={githubToken}
-                          onChange={(e) => setGithubToken(e.target.value)}
-                          placeholder="ghp_... (optional read:user token)"
-                          disabled={busy}
-                          className="mt-2 w-full px-3.5 py-2.5 theme-card border rounded-xl text-xs placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--border-focus)] transition"
-                        />
-                      )}
+                      <label htmlFor="auth-github-token" className="block text-xs font-semibold theme-sub mb-1">
+                        GitHub Personal Access Token
+                      </label>
+                      <input
+                        id="auth-github-token"
+                        type="password"
+                        value={githubToken}
+                        onChange={(e) => setGithubToken(e.target.value)}
+                        placeholder="ghp_... (read:user / user:email)"
+                        disabled={busy}
+                        className="w-full px-3.5 py-2.5 theme-card border rounded-xl text-xs placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--border-focus)] transition"
+                      />
                     </div>
 
                     <button

@@ -174,6 +174,7 @@ async function connectMongo() {
     console.log('[DB] Connected to MongoDB 7.0');
   } catch (err) {
     console.warn('[DB] MongoDB connection warning:', err.message);
+    throw err;
   }
 }
 
@@ -189,6 +190,7 @@ async function connectPostgres() {
     console.log('[DB] Connected to PostgreSQL 16 (pg pool + Prisma ORM)');
   } catch (err) {
     console.warn('[DB] PostgreSQL connection warning:', err.message);
+    throw err;
   }
 }
 

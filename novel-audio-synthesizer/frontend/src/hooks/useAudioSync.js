@@ -203,6 +203,7 @@ export function useAudioSync(timeline = [], onSegmentChangeOrOptions = null, may
   const ttsRafRef = useRef(0);
   const speechFallbackTimerRef = useRef(null);
   const playbackRateRef = useRef(1.0);
+  const [playbackRate, setPlaybackRateState] = useState(1.0);
   const lastActiveSegIdRef = useRef(-1);
   const lastClockUpdateRef = useRef(0);
   const speechCancelledRef = useRef(false);
@@ -229,6 +230,10 @@ export function useAudioSync(timeline = [], onSegmentChangeOrOptions = null, may
   const [currentTimeMs, setCurrentTimeMs] = useState(0);
   const [duration, setDuration] = useState(0);
   const [segmentProgress, setSegmentProgress] = useState(0);
+  const segmentProgressRef = useRef(0);
+  useEffect(() => {
+    segmentProgressRef.current = segmentProgress;
+  }, [segmentProgress]);
 
   // Playback mode: 'tts' (Voice TTS read-along) vs 'studio' (stitched audio stream)
   // In real browser: default to 'tts' so every chapter (1-17 & EPUB) has live multi-voice speech!
@@ -827,10 +832,10 @@ export function useAudioSync(timeline = [], onSegmentChangeOrOptions = null, may
       clearSegmentBlobCache();
       stopSpeech();
       if (isPlaying && playbackModeRef.current === 'tts' && activeSegmentId !== -1) {
-        speakActiveSegmentRef.current?.(activeSegmentId, segmentProgress);
+        speakActiveSegmentRef.current?.(activeSegmentId, segmentProgressRef.current);
       }
     },
-    [stopSpeech, clearSegmentBlobCache, isPlaying, activeSegmentId, segmentProgress]
+    [stopSpeech, clearSegmentBlobCache, isPlaying, activeSegmentId]
   );
 
   useEffect(() => {
@@ -931,16 +936,20 @@ export function useAudioSync(timeline = [], onSegmentChangeOrOptions = null, may
     return () => cancelAnimationFrame(rafRef.current);
   }, [isPlaying, playbackMode, syncLoop]);
 
-  const handlePlay = useCallback(() => setIsPlaying(true), []);
+  const handlePlay = useCallback(() => {
+    if (playbackModeRef.current !== 'studio') return;
+    setIsPlaying(true);
+  }, []);
   const handlePause = useCallback(() => {
+    if (playbackModeRef.current !== 'studio') return;
     setIsPlaying(false);
-    stopSpeech();
     if (audioRef.current) {
       setCurrentTimeMs(Math.round(audioRef.current.currentTime * 1000));
     }
-  }, [stopSpeech]);
+  }, []);
 
   const handleEnded = useCallback(() => {
+    if (playbackModeRef.current !== 'studio') return;
     setIsPlaying(false);
     stopSpeech();
     lastActiveSegIdRef.current = -1;
@@ -1075,7 +1084,7 @@ export function useAudioSync(timeline = [], onSegmentChangeOrOptions = null, may
         lastActiveSegIdRef.current = targetId;
       }
       if (targetId !== -1) {
-        speakActiveSegment(targetId, segmentProgress);
+        speakActiveSegment(targetId, segmentProgressRef.current);
       }
     } else {
       // Cleanly pause secondaryAudioRef before playing studio audio
@@ -1084,7 +1093,7 @@ export function useAudioSync(timeline = [], onSegmentChangeOrOptions = null, may
         audioRef.current.play().catch(() => {});
       }
     }
-  }, [activeSegmentId, timeline, segmentProgress, speakActiveSegment, stopSpeech]);
+  }, [activeSegmentId, timeline, speakActiveSegment, stopSpeech]);
 
   const pause = useCallback(() => {
     setIsPlaying(false);
@@ -1104,12 +1113,14 @@ export function useAudioSync(timeline = [], onSegmentChangeOrOptions = null, may
   }, [isPlaying, play, pause]);
 
   const setPlaybackRate = useCallback((rate) => {
-    playbackRateRef.current = rate || 1.0;
+    const safeRate = rate || 1.0;
+    playbackRateRef.current = safeRate;
+    setPlaybackRateState(safeRate);
     if (audioRef.current) {
-      audioRef.current.playbackRate = rate;
+      audioRef.current.playbackRate = safeRate;
     }
     if (secondaryAudioRef.current) {
-      secondaryAudioRef.current.playbackRate = rate;
+      secondaryAudioRef.current.playbackRate = safeRate;
     }
   }, []);
 
@@ -1120,65 +1131,63 @@ export function useAudioSync(timeline = [], onSegmentChangeOrOptions = null, may
         ? targetMode
         : null;
 
-    setPlaybackMode((prev) => {
-      const next = validMode || (prev === 'tts' ? 'studio' : 'tts');
-      if (next === prev) return prev;
+    const prev = playbackModeRef.current;
+    const next = validMode || (prev === 'tts' ? 'studio' : 'tts');
+    if (next === prev) return;
 
-      playbackModeRef.current = next;
+    playbackModeRef.current = next;
+    setPlaybackMode(next);
 
-      if (next === 'tts') {
-        // Switching from Studio Track -> Voice TTS
-        // 1. Cleanly pause audioRef before playing TTS speech
-        if (audioRef.current) {
-          try {
-            audioRef.current.pause();
-          } catch (_) {}
-        }
+    if (next === 'tts') {
+      // Switching from Studio Track -> Voice TTS
+      // 1. Cleanly pause audioRef before playing TTS speech
+      if (audioRef.current) {
+        try {
+          audioRef.current.pause();
+        } catch (_) {}
+      }
 
-        // 2. Maintain current timestamp/segment position (do NOT reset clock to 0:00)
-        const currentMs =
-          audioRef.current && !isNaN(audioRef.current.currentTime) && audioRef.current.currentTime > 0
-            ? Math.round(audioRef.current.currentTime * 1000)
-            : currentTimeMs;
-        setCurrentTimeMs(currentMs);
+      // 2. Maintain current timestamp/segment position (do NOT reset clock to 0:00)
+      const currentMs =
+        audioRef.current && !isNaN(audioRef.current.currentTime) && audioRef.current.currentTime > 0
+          ? Math.round(audioRef.current.currentTime * 1000)
+          : currentTimeMs;
+      setCurrentTimeMs(currentMs);
 
-        const currentSegId =
-          activeSegmentId !== -1 ? activeSegmentId : findActiveSegment(timeline, currentMs);
-        const targetId =
-          currentSegId !== -1 ? currentSegId : (timeline[0]?.segment_id ?? timeline[0]?.order ?? 1);
+      const currentSegId =
+        activeSegmentId !== -1 ? activeSegmentId : findActiveSegment(timeline, currentMs);
+      const targetId =
+        currentSegId !== -1 ? currentSegId : (timeline[0]?.segment_id ?? timeline[0]?.order ?? 1);
 
-        if (targetId !== -1) {
-          setActiveSegmentId(targetId);
-          lastActiveSegIdRef.current = targetId;
-          const entry = timeline.find(
-            (t) => (t.segment_id !== undefined ? t.segment_id : t.order) === targetId
-          );
-          if (entry && entry.end_ms > entry.start_ms && currentMs >= entry.start_ms) {
-            setSegmentProgress(
-              Math.min(1, Math.max(0, (currentMs - entry.start_ms) / (entry.end_ms - entry.start_ms)))
-            );
-          }
-        }
-
-        if (isPlaying && targetId !== -1) {
-          speakActiveSegmentRef.current?.(targetId, 0);
-        }
-      } else {
-        // Switching from Voice TTS -> Studio Track
-        // 1. Cleanly pause secondaryAudioRef before playing studio audio
-        stopSpeech();
-
-        // 2. Maintain current timestamp position in audioRef (do NOT reset clock to 0:00)
-        if (audioRef.current) {
-          audioRef.current.currentTime = Math.max(0, currentTimeMs / 1000);
-          if (isPlaying) {
-            audioRef.current.play().catch(() => {});
-          }
+      let nextProg = 0;
+      if (targetId !== -1) {
+        setActiveSegmentId(targetId);
+        lastActiveSegIdRef.current = targetId;
+        const entry = timeline.find(
+          (t) => (t.segment_id !== undefined ? t.segment_id : t.order) === targetId
+        );
+        if (entry && entry.end_ms > entry.start_ms && currentMs >= entry.start_ms) {
+          nextProg = Math.min(1, Math.max(0, (currentMs - entry.start_ms) / (entry.end_ms - entry.start_ms)));
+          setSegmentProgress(nextProg);
         }
       }
 
-      return next;
-    });
+      if (isPlaying && targetId !== -1) {
+        speakActiveSegmentRef.current?.(targetId, nextProg);
+      }
+    } else {
+      // Switching from Voice TTS -> Studio Track
+      // 1. Cleanly pause secondaryAudioRef before playing studio audio
+      stopSpeech();
+
+      // 2. Maintain current timestamp position in audioRef (do NOT reset clock to 0:00)
+      if (audioRef.current) {
+        audioRef.current.currentTime = Math.max(0, currentTimeMs / 1000);
+        if (isPlaying) {
+          audioRef.current.play().catch(() => {});
+        }
+      }
+    }
   }, [isPlaying, activeSegmentId, timeline, currentTimeMs, stopSpeech]);
 
   const safeSetPlaybackMode = useCallback(
@@ -1203,6 +1212,7 @@ export function useAudioSync(timeline = [], onSegmentChangeOrOptions = null, may
     currentTimeMs,
     duration,
     segmentProgress,
+    playbackRate,
     playbackMode,
     setPlaybackMode: safeSetPlaybackMode,
     togglePlaybackMode,

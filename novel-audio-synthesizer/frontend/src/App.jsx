@@ -288,10 +288,23 @@ function AppContent() {
     }
   }, [pathname, location.search]);
 
-  // Auto-close character roster when navigating outside reader view
+  const audioSyncRef = useRef(audioSync);
+  audioSyncRef.current = audioSync;
+  const currentNovelRef = useRef(currentNovel);
+  currentNovelRef.current = currentNovel;
+  const loadChapterRequestIdRef = useRef(0);
+  const lastRequestedRouteChapterRef = useRef(null);
+
+  // Auto-close character roster and stop active playback when navigating outside reader view
   useEffect(() => {
-    if (view !== 'reader' && showRoster) {
-      setShowRoster(false);
+    if (view !== 'reader') {
+      lastRequestedRouteChapterRef.current = null;
+      if (showRoster) {
+        setShowRoster(false);
+      }
+      if (audioSyncRef.current?.isPlaying) {
+        audioSyncRef.current.pause();
+      }
     }
   }, [view, showRoster]);
 
@@ -467,6 +480,8 @@ function AppContent() {
 
   // Load chapter helper (used for route navigation and deep links)
   const loadChapterById = useCallback(async (chapterId, novel = null) => {
+    const reqId = ++loadChapterRequestIdRef.current;
+    lastRequestedRouteChapterRef.current = chapterId;
     setIsLoadingChapter(true);
     setChapterError(null);
     setChapterSegments(EMPTY_ARRAY);
@@ -480,6 +495,7 @@ function AppContent() {
         api.novels
           .get(novel.id)
           .then((nData) => {
+            if (reqId !== loadChapterRequestIdRef.current) return;
             if (Array.isArray(nData?.chapters)) {
               setNovelChapters(nData.chapters);
             }
@@ -491,11 +507,13 @@ function AppContent() {
       }
 
       const details = await api.chapters.get(chapterId);
+      if (reqId !== loadChapterRequestIdRef.current) return;
+
       setCurrentChapter((prev) => ({ ...(prev || {}), ...details }));
       const studioReady = Boolean(details.has_studio_audio);
       setHasStudioAudio(studioReady);
-      if (!studioReady && audioSync.playbackMode === 'studio') {
-        audioSync.togglePlaybackMode('tts');
+      if (!studioReady && audioSyncRef.current?.playbackMode === 'studio') {
+        audioSyncRef.current.togglePlaybackMode('tts');
       }
 
       if (Array.isArray(details?.characters)) {
@@ -505,6 +523,7 @@ function AppContent() {
       if (!novel && details.novel_id) {
         try {
           const fetchedNovel = await api.novels.get(details.novel_id);
+          if (reqId !== loadChapterRequestIdRef.current) return;
           setCurrentNovel(fetchedNovel);
           setSelectedNovelId(fetchedNovel.id);
           if (Array.isArray(fetchedNovel?.chapters)) {
@@ -519,6 +538,7 @@ function AppContent() {
         setSelectedNovelId(novel.id);
       }
 
+      if (reqId !== loadChapterRequestIdRef.current) return;
       if (resolvedCharacters) {
         setNovelCharacters((prev) => mergeNovelCharacters(prev, resolvedCharacters));
       } else {
@@ -529,6 +549,7 @@ function AppContent() {
       if (segments.length === 0 && (details.status === 'draft' || !details.status)) {
         try {
           const parsedRes = await api.chapters.parse(chapterId);
+          if (reqId !== loadChapterRequestIdRef.current) return;
           if (parsedRes?.segments) {
             segments = parsedRes.segments;
           }
@@ -537,20 +558,25 @@ function AppContent() {
           }
         } catch (_) {}
       }
+      if (reqId !== loadChapterRequestIdRef.current) return;
       setChapterSegments(segments);
 
       let manifest = details.manifest || null;
       if (!manifest) {
         try {
           manifest = await api.chapters.getManifest(chapterId);
+          if (reqId !== loadChapterRequestIdRef.current) return;
         } catch (_) {}
       }
 
       setChapterManifest(buildChapterManifestState(chapterId, details, segments, manifest));
     } catch (err) {
+      if (reqId !== loadChapterRequestIdRef.current) return;
       setChapterError(err.message || 'Failed to load chapter audio and segments.');
     } finally {
-      setIsLoadingChapter(false);
+      if (reqId === loadChapterRequestIdRef.current) {
+        setIsLoadingChapter(false);
+      }
     }
   }, [buildChapterManifestState, mergeNovelCharacters]);
 
@@ -623,11 +649,11 @@ function AppContent() {
   // Sync routeChapterId when navigating deep link to /reader/:chapterId
   useEffect(() => {
     if (view === 'reader' && routeChapterId) {
-      if (currentChapter?.id !== routeChapterId || chapterSegments.length === 0) {
-        loadChapterById(routeChapterId, currentNovel);
+      if (lastRequestedRouteChapterRef.current !== routeChapterId) {
+        loadChapterById(routeChapterId, currentNovelRef.current);
       }
     }
-  }, [view, routeChapterId, currentChapter?.id, currentNovel, chapterSegments.length, loadChapterById]);
+  }, [view, routeChapterId, loadChapterById]);
 
   // Open novel details
   const handleSelectNovel = (novelId) => {
@@ -637,6 +663,7 @@ function AppContent() {
 
   // Open chapter in Reader
   const handleSelectChapter = useCallback(async (novel, chapter) => {
+    lastRequestedRouteChapterRef.current = chapter.id;
     executeViewTransition(() => {
       setCurrentNovel(novel);
       if (novel?.id) {
@@ -786,9 +813,11 @@ function AppContent() {
       const manifest = synthRes?.manifest || synthRes;
       if (manifest && (manifest.timeline || manifest.audio_url || manifest.total_duration_ms)) {
         setHasStudioAudio(true);
+        const baseStream = resolveMediaUrl(manifest.audio_url || `/api/stream/${currentChapter.id}`);
+        const sep = baseStream.includes('?') ? '&' : '?';
         setChapterManifest({
           ...manifest,
-          audio_stream_url: resolveMediaUrl(`${manifest.audio_url || `/api/stream/${currentChapter.id}`}?t=${Date.now()}`),
+          audio_stream_url: `${baseStream}${sep}t=${Date.now()}`,
         });
       }
       try {
@@ -799,8 +828,27 @@ function AppContent() {
       } catch (_) {}
     } catch (err) {
       setChapterError(err.message || 'Failed to trigger chapter synthesis.');
+      throw err;
     }
   };
+
+  const nextChapterObj = useMemo(() => {
+    if (!currentChapter || novelChapters.length === 0) return null;
+    const idx = novelChapters.findIndex((c) => c.id === currentChapter.id);
+    if (idx >= 0 && idx + 1 < novelChapters.length) {
+      return novelChapters[idx + 1];
+    }
+    return (
+      novelChapters.find(
+        (c) => Number(c.chapter_number) === Number(currentChapter.chapter_number) + 1
+      ) || null
+    );
+  }, [currentChapter, novelChapters]);
+
+  const handleNextChapter = useMemo(() => {
+    if (!nextChapterObj) return null;
+    return () => handleSelectChapter(currentNovel, nextChapterObj);
+  }, [nextChapterObj, currentNovel, handleSelectChapter]);
 
   return (
     <div className="min-h-screen bg-[var(--bg-page)] text-[var(--text-main)] flex flex-col font-sans transition-colors duration-200">
@@ -1004,17 +1052,7 @@ function AppContent() {
                             handleSelectChapter(currentNovel, currentChapter);
                           }
                         }}
-                        onNextChapter={(() => {
-                          if (!currentChapter || novelChapters.length === 0) return null;
-                          const idx = novelChapters.findIndex((c) => c.id === currentChapter.id);
-                          const nextCh =
-                            idx >= 0 && idx + 1 < novelChapters.length
-                              ? novelChapters[idx + 1]
-                              : novelChapters.find(
-                                  (c) => Number(c.chapter_number) === Number(currentChapter.chapter_number) + 1
-                                );
-                          return nextCh ? () => handleSelectChapter(currentNovel, nextCh) : null;
-                        })()}
+                        onNextChapter={handleNextChapter}
                         onBack={() => {
                           if (selectedNovelId || currentNovel?.id) {
                             handleNavigate('details', selectedNovelId || currentNovel?.id);
@@ -1085,6 +1123,7 @@ function AppContent() {
                   isPlaying={audioSync.isPlaying}
                   currentTimeMs={audioSync.currentTimeMs}
                   totalDurationMs={chapterManifest.total_duration_ms || currentChapter?.total_duration_ms || 0}
+                  speed={audioSync.playbackRate}
                   onToggle={audioSync.toggle}
                   onSetPlaybackRate={audioSync.setPlaybackRate}
                   onSeek={audioSync.seekToTimeMs}
@@ -1114,11 +1153,12 @@ function AppContent() {
                   isFollowingAlong={isFollowingAlong}
                   onToggleFollowAlong={() => setIsFollowingAlong((prev) => !prev)}
                   onSeekSegment={(dir) => {
-                    const currentIdx = chapterSegments.findIndex(
+                    const seekList = effectiveTimeline.length > 0 ? effectiveTimeline : chapterSegments;
+                    const currentIdx = seekList.findIndex(
                       (s) => (s.segment_id ?? s.order) === audioSync.activeSegmentId
                     );
-                    const targetIdx = Math.max(0, Math.min(chapterSegments.length - 1, (currentIdx >= 0 ? currentIdx : 0) + dir));
-                    const targetSeg = chapterSegments[targetIdx];
+                    const targetIdx = Math.max(0, Math.min(seekList.length - 1, (currentIdx >= 0 ? currentIdx : 0) + dir));
+                    const targetSeg = seekList[targetIdx];
                     if (targetSeg) {
                       audioSync.seekToSegment(targetSeg.segment_id ?? targetSeg.order);
                     }

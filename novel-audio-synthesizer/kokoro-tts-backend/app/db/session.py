@@ -20,6 +20,8 @@ if not env_loaded:
 
 DEFAULT_DB_URL = "postgresql://synctone_user:synctone_pass@localhost:5432/synctone"
 raw_db_url = os.getenv("DATABASE_URL", DEFAULT_DB_URL)
+if raw_db_url.startswith("postgres://"):
+    raw_db_url = raw_db_url.replace("postgres://", "postgresql://", 1)
 
 # Normalize URLs for sync and async drivers
 if raw_db_url.startswith("postgresql://"):

@@ -571,17 +571,7 @@ class TTSEngine {
         if (!finished) {
           finished = true;
           clearTimeout(timeout);
-          if (chunks.length > 0) {
-            const buffer = Buffer.concat(chunks);
-            const durationMs = Math.round((buffer.length / this.bytesPerSec) * 1000);
-            return resolve({
-              audio_buffer: buffer,
-              duration_ms: durationMs,
-              format: 'mp3',
-              engine: 'msedge-tts',
-            });
-          }
-          reject(new Error(`Edge TTS WebSocket closed unexpectedly with code ${code}`));
+          reject(new Error(`Edge TTS WebSocket closed unexpectedly before turn.end (code ${code}, bytes=${Buffer.concat(chunks).length})`));
         }
       });
     });
@@ -606,11 +596,11 @@ class TTSEngine {
         await execFileAsync(
           edgeBin,
           [
-            '--text', text,
-            '--voice', voiceId,
-            '--rate', prosody.rate || '+0%',
-            '--pitch', edgePitch,
-            '--write-media', tmpFile,
+            `--text=${text}`,
+            `--voice=${voiceId}`,
+            `--rate=${prosody.rate || '+0%'}`,
+            `--pitch=${edgePitch}`,
+            `--write-media=${tmpFile}`,
             '--no-progress',
           ],
           { timeout: 15000 }
@@ -620,11 +610,11 @@ class TTSEngine {
           'python3',
           [
             '-m', 'edge_tts',
-            '--text', text,
-            '--voice', voiceId,
-            '--rate', prosody.rate || '+0%',
-            '--pitch', edgePitch,
-            '--write-media', tmpFile,
+            `--text=${text}`,
+            `--voice=${voiceId}`,
+            `--rate=${prosody.rate || '+0%'}`,
+            `--pitch=${edgePitch}`,
+            `--write-media=${tmpFile}`,
             '--no-progress',
           ],
           { timeout: 15000 }
@@ -825,7 +815,7 @@ class TTSEngine {
     }
 
     // When NOT in failHonestly mode, fall back to Machine TTS returning true engine name
-    const machineRes = await this.synthesizeWithMachine(trimmed, voiceId, speed);
+    const machineRes = await this.synthesizeWithMachine(trimmed, voiceId, speed, options);
     return {
       ...machineRes,
       engine: 'machine-tts',
@@ -1184,8 +1174,9 @@ class TTSEngine {
       const searchStr = `${charId} ${speakerName}`.toLowerCase().trim();
       for (const [kw, archetype] of SORTED_KEYWORDS) {
         if (matchesKeyword(searchStr, kw)) {
-          if (VOICE_CATALOG[archetype]) {
-            charCatalogEntry = VOICE_CATALOG[archetype];
+          const entry = typeof archetype === 'string' ? VOICE_CATALOG[archetype] : archetype;
+          if (entry) {
+            charCatalogEntry = entry;
             break;
           }
         }

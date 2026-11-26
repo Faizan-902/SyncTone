@@ -1,15 +1,19 @@
 const jwt = require('jsonwebtoken');
 const { config } = require('../config');
 
+function extractToken(req) {
+  if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
+    const bearer = req.headers.authorization.slice(7).trim();
+    if (bearer) return bearer;
+  }
+  return req.cookies?.token || null;
+}
+
 /**
- * Middleware to authenticate requests via JWT stored in HTTP-only cookie or Authorization header.
+ * Middleware to authenticate requests via JWT stored in Authorization header or HTTP-only cookie.
  */
 function authenticateUser(req, res, next) {
-  const token =
-    req.cookies?.token ||
-    (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')
-      ? req.headers.authorization.slice(7)
-      : null);
+  const token = extractToken(req);
 
   if (!token) {
     return res.status(401).json({ error: 'Authentication required. Please log in.' });
@@ -28,11 +32,7 @@ function authenticateUser(req, res, next) {
  * Optional authentication middleware: populates req.user if valid token present, does not block.
  */
 function optionalAuth(req, _res, next) {
-  const token =
-    req.cookies?.token ||
-    (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')
-      ? req.headers.authorization.slice(7)
-      : null);
+  const token = extractToken(req);
 
   if (token) {
     try {

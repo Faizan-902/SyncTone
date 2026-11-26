@@ -4,6 +4,7 @@ Generates per-segment audio using the Kokoro multi-speaker TTS model.
 Uses kokoro-tts (PyTorch-based) for inference.
 """
 
+import asyncio
 import numpy as np
 from typing import Optional
 from pathlib import Path
@@ -15,7 +16,7 @@ logger = get_logger(__name__)
 
 EDGE_TO_KOKORO_MAP = {
     "en-GB-RyanNeural": "bm_george",
-    "en-GB-ArthurNeural": "am_george",
+    "en-GB-ArthurNeural": "bm_lewis",
     "en-GB-SoniaNeural": "af_sarah",
     "en-GB-LibbyNeural": "bf_emma",
     "en-GB-ThomasNeural": "am_adam",
@@ -25,8 +26,8 @@ EDGE_TO_KOKORO_MAP = {
 }
 VALID_KOKORO_VOICES = {
     "af_heart", "af_bella", "af_nicole", "af_sky", "af_sarah",
-    "am_adam", "am_michael", "am_george", "am_onyx",
-    "bm_george", "bf_emma", "bm_daniel",
+    "am_adam", "am_michael", "am_onyx",
+    "bm_george", "bm_lewis", "bf_emma", "bm_daniel",
 }
 
 
@@ -80,7 +81,7 @@ class TTSEngine:
 
         try:
             try:
-                import os, shutil, espeakng_loader
+                import os, shutil, uuid, espeakng_loader
                 from kokoro_onnx import Kokoro, EspeakConfig
                 orig_dp = espeakng_loader.get_data_path()
                 if len(orig_dp) > 130:
@@ -88,7 +89,12 @@ class TTSEngine:
                     if os.path.islink(short_dp):
                         os.unlink(short_dp)
                     if not os.path.exists(short_dp):
-                        shutil.copytree(orig_dp, short_dp, symlinks=True)
+                        tmp_dp = f"/tmp/espeak-ng-data.{uuid.uuid4().hex}"
+                        shutil.copytree(orig_dp, tmp_dp, symlinks=True)
+                        try:
+                            os.replace(tmp_dp, short_dp)
+                        except OSError:
+                            shutil.rmtree(tmp_dp, ignore_errors=True)
                     orig_dp = short_dp
                 self._model = Kokoro(str(model_file), str(voices_file), espeak_config=EspeakConfig(data_path=orig_dp))
             except ImportError:
@@ -119,14 +125,8 @@ class TTSEngine:
         Returns:
             Tuple of (pcm_samples as float32 numpy array, duration_ms).
         """
-        self._ensure_initialized()
-
-        if not text.strip():
-            # Return silence for empty segments
-            silence = np.zeros(int(self._sample_rate * 0.1), dtype=np.float32)
-            return silence, 100
-
-        try:
+        def _run_synthesis_sync() -> tuple[np.ndarray, int]:
+            self._ensure_initialized()
             kokoro_voice = resolve_kokoro_voice(voice_id)
             lang = "en-gb" if kokoro_voice.startswith("b") else "en-us"
             if hasattr(self._model, 'create'):
@@ -146,11 +146,9 @@ class TTSEngine:
             else:
                 raise RuntimeError("Unsupported Kokoro model interface")
 
-            # Ensure float32
             if samples.dtype != np.float32:
                 samples = samples.astype(np.float32)
 
-            # Update sample rate if model returns different
             if sr != self._sample_rate:
                 logger.warning(
                     f"Model sample rate ({sr}) differs from config ({self._sample_rate})"
@@ -158,21 +156,21 @@ class TTSEngine:
                 self._sample_rate = sr
 
             duration_ms = int(len(samples) / sr * 1000)
-
             logger.debug(
                 f"Synthesized {len(text)} chars with voice '{voice_id}' → "
                 f"{duration_ms}ms ({len(samples)} samples @ {sr}Hz)"
             )
-
             return samples, duration_ms
 
+        if not text.strip():
+            silence = np.zeros(int(self._sample_rate * 0.1), dtype=np.float32)
+            return silence, 100
+
+        try:
+            return await asyncio.to_thread(_run_synthesis_sync)
         except Exception as e:
             logger.error(f"TTS synthesis failed for voice '{voice_id}': {e}")
-            # Return 500ms of silence as fallback
-            fallback = np.zeros(
-                int(self._sample_rate * 0.5), dtype=np.float32
-            )
-            return fallback, 500
+            raise RuntimeError(f"TTS synthesis failed for voice '{voice_id}': {e}") from e
 
     async def check_model_available(self) -> dict:
         """Check if the TTS model files exist and return status."""

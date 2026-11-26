@@ -65,6 +65,12 @@ SPEECH_TAG_START = re.compile(
 )
 
 
+PRONOUN_NON_SPEAKERS = {
+    "i", "you", "he", "she", "it", "we", "they",
+    "one", "someone", "anyone", "everyone", "nobody", "somebody",
+}
+
+
 def _clean_speaker_name(raw: str) -> str:
     """Clean and normalize an extracted speaker name."""
     # Remove common leading words that aren't names
@@ -74,10 +80,10 @@ def _clean_speaker_name(raw: str) -> str:
     while words and words[0].lower() in noise_words:
         words.pop(0)
     name = " ".join(words).strip()
-    # Basic validation: name should be 1-3 words, start with uppercase
+    # Basic validation: name should be 1-3 words, start with uppercase, and not be a pronoun
     if not name or len(name.split()) > 3:
         return ""
-    if name[0].islower():
+    if name[0].islower() or name.lower() in PRONOUN_NON_SPEAKERS:
         return ""
     return name
 
@@ -142,7 +148,7 @@ def _extract_speaker_spacy(
                                     name_parts.append(left.text)
                             name_parts.append(child.text)
                             name = " ".join(name_parts)
-                            if name and name[0].isupper():
+                            if name and name[0].isupper() and name.lower() not in PRONOUN_NON_SPEAKERS:
                                 return name, AttributionSource.DEPENDENCY_TREE
     except Exception as e:
         logger.warning(f"spaCy extraction failed: {e}")
@@ -193,42 +199,79 @@ def parse_chapter(
     segments: list[Segment] = []
     known_characters: set[str] = set()
 
-    for idx, para in enumerate(paragraphs):
-        if _has_dialogue(para):
-            # --- Dialogue segment ---
-            dialogue_text = _extract_dialogue_text(para)
+    seg_counter = 0
+    for para in paragraphs:
+        matches = list(DIALOGUE_PATTERN.finditer(para))
+        if matches:
+            para_speaker, para_source = _extract_speaker_regex(para)
+            if para_speaker is None and nlp is not None:
+                para_speaker, para_source = _extract_speaker_spacy(para, nlp)
 
-            # Try regex extraction first
-            speaker, source = _extract_speaker_regex(para)
+            cursor = 0
+            for m in matches:
+                leading = para[cursor:m.start()].strip()
+                if leading:
+                    segments.append(
+                        Segment(
+                            segment_id=seg_counter,
+                            type=SegmentType.NARRATION,
+                            speaker_name="Narrator",
+                            speaker_id="narrator",
+                            text=leading,
+                            attribution_confidence=1.0,
+                            attribution_source=AttributionSource.NARRATOR_DEFAULT,
+                        )
+                    )
+                    seg_counter += 1
 
-            # Fall back to spaCy if available and regex failed
-            if speaker is None and nlp is not None:
-                speaker, source = _extract_speaker_spacy(para, nlp)
+                local_window = para[max(0, m.start() - 80):min(len(para), m.end() + 80)]
+                speaker, source = _extract_speaker_regex(local_window)
+                if speaker is None:
+                    speaker, source = para_speaker, para_source
 
-            if speaker:
-                known_characters.add(speaker)
-                speaker_id = speaker.lower().replace(" ", "_")
-            else:
-                speaker = ""
-                speaker_id = "unresolved"
-                source = AttributionSource.UNRESOLVED
+                if speaker:
+                    known_characters.add(speaker)
+                    speaker_id = speaker.lower().replace(" ", "_")
+                else:
+                    speaker = ""
+                    speaker_id = "unresolved"
+                    source = AttributionSource.UNRESOLVED
 
-            segments.append(
-                Segment(
-                    segment_id=idx,
-                    type=SegmentType.DIALOGUE,
-                    speaker_name=speaker,
-                    speaker_id=speaker_id,
-                    text=dialogue_text,
-                    attribution_confidence=0.9 if speaker else 0.0,
-                    attribution_source=source,
+                dialogue_text = m.group(1).strip()
+                if dialogue_text:
+                    segments.append(
+                        Segment(
+                            segment_id=seg_counter,
+                            type=SegmentType.DIALOGUE,
+                            speaker_name=speaker,
+                            speaker_id=speaker_id,
+                            text=dialogue_text,
+                            attribution_confidence=0.9 if speaker else 0.0,
+                            attribution_source=source,
+                        )
+                    )
+                    seg_counter += 1
+                cursor = m.end()
+
+            trailing = para[cursor:].strip()
+            if trailing:
+                segments.append(
+                    Segment(
+                        segment_id=seg_counter,
+                        type=SegmentType.NARRATION,
+                        speaker_name="Narrator",
+                        speaker_id="narrator",
+                        text=trailing,
+                        attribution_confidence=1.0,
+                        attribution_source=AttributionSource.NARRATOR_DEFAULT,
+                    )
                 )
-            )
+                seg_counter += 1
         else:
             # --- Narration segment ---
             segments.append(
                 Segment(
-                    segment_id=idx,
+                    segment_id=seg_counter,
                     type=SegmentType.NARRATION,
                     speaker_name="Narrator",
                     speaker_id="narrator",
@@ -237,6 +280,7 @@ def parse_chapter(
                     attribution_source=AttributionSource.NARRATOR_DEFAULT,
                 )
             )
+            seg_counter += 1
 
     logger.info(
         f"Parsed {len(segments)} segments — "

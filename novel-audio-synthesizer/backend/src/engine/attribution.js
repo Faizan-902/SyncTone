@@ -41,46 +41,59 @@ class AttributionEngine {
       return segments;
     }
 
-    const windowLines = segments.slice(0, 120).map((s, idx) => ({
-      index: idx,
-      type: s.type,
-      current_speaker: s.speaker_name || 'Unknown',
-      text: String(s.text || '').slice(0, 400),
-    }));
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+    const byIndex = new Map();
+    const CHUNK_SIZE = 120;
 
-    const prompt = `Resolve the speaker for all unresolved dialogue segments in this chapter excerpt.
+    for (let offset = 0; offset < segments.length; offset += CHUNK_SIZE) {
+      const slice = segments.slice(offset, offset + CHUNK_SIZE);
+      const hasUnresolvedInSlice = slice.some((s, localIdx) =>
+        unresolvedIndices.includes(offset + localIdx)
+      );
+      if (!hasUnresolvedInSlice) continue;
+
+      const windowLines = slice.map((s, localIdx) => ({
+        index: offset + localIdx,
+        type: s.type,
+        current_speaker: s.speaker_name || 'Unknown',
+        text: String(s.text || '').slice(0, 400),
+      }));
+
+      const prompt = `Resolve the speaker for all unresolved dialogue segments in this chapter excerpt.
 Known characters: ${knownCharacters.length > 0 ? knownCharacters.join(', ') : 'Infer from context'}.
 Return ONLY a JSON array of objects: [{"index": number, "speaker_name": "Canonical Name", "confidence": 0.92}].
 Excerpt:
 ${JSON.stringify(windowLines)}`;
 
-    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
-    const res = await fetch(endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
-        generationConfig: {
-          temperature: 0.1,
-          responseMimeType: 'application/json',
-        },
-      }),
-    });
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(30000),
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          generationConfig: {
+            temperature: 0.1,
+            responseMimeType: 'application/json',
+          },
+        }),
+      });
 
-    if (!res.ok) {
-      throw new Error(`Gemini attribution HTTP ${res.status}`);
+      if (!res.ok) {
+        throw new Error(`Gemini attribution HTTP ${res.status}`);
+      }
+
+      const data = await res.json();
+      const rawText = data?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '[]';
+      const resolutions = JSON.parse(rawText.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim());
+      if (Array.isArray(resolutions)) {
+        for (const r of resolutions) {
+          byIndex.set(Number(r.index), r);
+        }
+      }
     }
 
-    const data = await res.json();
-    const rawText = data?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '[]';
-    const resolutions = JSON.parse(rawText.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim());
-    if (!Array.isArray(resolutions)) {
-      return null;
-    }
-
-    const byIndex = new Map(resolutions.map((r) => [Number(r.index), r]));
     return segments.map((seg, idx) => {
-      if (!byIndex.has(idx)) return seg;
+      if (seg.type !== 'dialogue' || !byIndex.has(idx)) return seg;
       const match = byIndex.get(idx);
       const name = String(match.speaker_name || '').trim();
       if (!name) return seg;
@@ -88,8 +101,6 @@ ${JSON.stringify(windowLines)}`;
         ...seg,
         speaker_name: name,
         speaker_id: name.toLowerCase().replace(/[^a-z0-9]/g, '_'),
-        voice_id: null,
-        assigned_voice_id: null,
         attribution_confidence: typeof match.confidence === 'number' ? match.confidence : 0.9,
         attribution_source: 'gemini_ai',
       };
@@ -153,8 +164,10 @@ ${JSON.stringify(windowLines)}`;
           );
 
           const answer = (res.data.response || '').trim();
-          for (const c of knownCharacters) {
-            if (answer.toLowerCase().includes(c.toLowerCase())) {
+          const sortedChars = [...knownCharacters].sort((a, b) => b.length - a.length);
+          for (const c of sortedChars) {
+            const escaped = c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            if (new RegExp(`\\b${escaped}\\b`, 'i').test(answer)) {
               resolvedName = c;
               resolvedViaOllama = true;
               break;
@@ -181,8 +194,6 @@ ${JSON.stringify(windowLines)}`;
         ...seg,
         speaker_name: resolvedName,
         speaker_id: resolvedName.toLowerCase().replace(/[^a-z0-9]/g, '_'),
-        voice_id: null,
-        assigned_voice_id: null,
         attribution_confidence: resolvedViaOllama ? 0.75 : 0.5,
         attribution_source: resolvedViaOllama ? 'llm_fallback' : 'alternation',
       };

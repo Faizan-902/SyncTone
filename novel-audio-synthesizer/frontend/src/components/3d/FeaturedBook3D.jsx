@@ -168,11 +168,11 @@ export default function FeaturedBook3D({
       metalness: 0.12,
     });
 
-    // Front cover texture loaded from novel.cover_object
+    // Front cover texture loaded from novel.cover_object (distinct fallback texture so disposal never aliases spine)
     const textureLoader = new THREE.TextureLoader();
     const frontCoverTexture = novel?.cover_object
       ? textureLoader.load(novel.cover_object)
-      : spineTexture;
+      : createSpineTexture(novel, volumeIndex + 1);
     frontCoverTexture.colorSpace = THREE.SRGBColorSpace;
 
     const frontCoverMaterial = new THREE.MeshStandardMaterial({
@@ -324,23 +324,41 @@ export default function FeaturedBook3D({
       bookMeshRef.current.rotation.y += 0.25;
     }
 
+    let cancelled = false;
+
     // Load new front cover texture
     const textureLoader = new THREE.TextureLoader();
-    if (novel.cover_object) {
+    if (novel?.cover_object) {
       textureLoader.load(novel.cover_object, (texture) => {
+        if (cancelled) {
+          texture.dispose();
+          return;
+        }
         texture.colorSpace = THREE.SRGBColorSpace;
         if (materials[4]) {
-          if (materials[4].map) materials[4].map.dispose();
+          if (materials[4].map && materials[4].map !== materials[1]?.map) {
+            materials[4].map.dispose();
+          }
           materials[4].map = texture;
           materials[4].needsUpdate = true;
         }
       });
+    } else if (materials[4]) {
+      const fallbackFront = createSpineTexture(novel, volumeIndex + 1);
+      fallbackFront.colorSpace = THREE.SRGBColorSpace;
+      if (materials[4].map && materials[4].map !== materials[1]?.map) {
+        materials[4].map.dispose();
+      }
+      materials[4].map = fallbackFront;
+      materials[4].needsUpdate = true;
     }
 
     // Re-generate spine and back cover textures with current novel metadata
     const spineTexture = createSpineTexture(novel, volumeIndex + 1);
     if (materials[1]) {
-      if (materials[1].map) materials[1].map.dispose();
+      if (materials[1].map && materials[1].map !== materials[4]?.map) {
+        materials[1].map.dispose();
+      }
       materials[1].map = spineTexture;
       materials[1].needsUpdate = true;
     }
@@ -351,6 +369,10 @@ export default function FeaturedBook3D({
       materials[5].map = backTexture;
       materials[5].needsUpdate = true;
     }
+
+    return () => {
+      cancelled = true;
+    };
   }, [novel?.id, volumeIndex]);
 
   // Pointer Parallax (mousemove over stage)
@@ -423,15 +445,29 @@ export default function FeaturedBook3D({
   if (webglError) {
     return (
       <div
+        role="button"
+        tabIndex={0}
         onClick={() => onSelectNovel && novel?.id && onSelectNovel(novel.id)}
+        onKeyDown={(e) => {
+          if ((e.key === 'Enter' || e.key === ' ') && onSelectNovel && novel?.id) {
+            e.preventDefault();
+            onSelectNovel(novel.id);
+          }
+        }}
         className={`relative w-52 sm:w-60 lg:w-64 aspect-[2/3] tilted-cover cursor-pointer group rounded-xl overflow-hidden shadow-2xl ${className}`}
         title={novel?.title}
       >
-        <img
-          src={novel?.cover_object}
-          alt={novel?.title}
-          className="w-full h-full object-cover rounded-xl"
-        />
+        {novel?.cover_object ? (
+          <img
+            src={novel.cover_object}
+            alt={novel?.title || 'Book cover'}
+            className="w-full h-full object-cover rounded-xl"
+          />
+        ) : (
+          <div className="w-full h-full flex items-center justify-center p-4 text-center bg-neutral-900 text-neutral-100 font-serif">
+            {novel?.title || 'Untitled Volume'}
+          </div>
+        )}
       </div>
     );
   }

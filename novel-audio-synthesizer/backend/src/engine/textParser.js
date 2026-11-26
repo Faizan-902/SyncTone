@@ -1193,13 +1193,14 @@ function parseChapter(rawText, title = 'Untitled Chapter', chapterId = 'ch-1', o
   for (let pIdx = 0; pIdx < paragraphs.length; pIdx++) {
     const para = paragraphs[pIdx];
 
-    // Handle standalone Markdown image blocks
+    // Handle standalone Markdown image blocks and [IMAGE:...] markers
     const imgMatch = para.match(/^!\[(.*?)\]\((.*?)\)$/);
-    if (imgMatch) {
+    const tagImgMatch = !imgMatch ? para.match(/^\[IMAGE:([^\]]+)\]$/) : null;
+    if (imgMatch || tagImgMatch) {
       pass1Paragraphs.push({
         type: 'image',
-        altText: imgMatch[1] || 'Illustration',
-        imageUrl: imgMatch[2],
+        altText: imgMatch ? (imgMatch[1] || 'Illustration') : 'Illustration',
+        imageUrl: imgMatch ? imgMatch[2] : tagImgMatch[1].trim(),
       });
       unclosedActive = false;
       continue;

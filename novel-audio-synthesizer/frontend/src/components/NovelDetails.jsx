@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { api, ApiError } from '../services/api';
 import { useAuth } from '../hooks/useAuth';
 import { preloadUploadChapterModal, preloadReaderView } from '../App';
@@ -179,23 +179,30 @@ export default function NovelDetails({ novelId, onBack, onSelectChapter, onOpenU
     });
   };
 
-  const fetchDetails = async () => {
+  const fetchDetails = useCallback(async (signal) => {
     setIsLoading(true);
     setError(null);
     try {
       const res = await api.novels.get(novelId);
+      if (signal?.aborted) return;
       setData(res);
     } catch (err) {
+      if (signal?.aborted) return;
       const msg = err instanceof ApiError ? err.message : err.message || 'Failed to load novel details';
       setError(msg);
     } finally {
-      setIsLoading(false);
+      if (!signal?.aborted) {
+        setIsLoading(false);
+      }
     }
-  };
+  }, [novelId]);
 
   useEffect(() => {
-    if (novelId) fetchDetails();
-  }, [novelId]);
+    if (!novelId) return;
+    const controller = new AbortController();
+    fetchDetails(controller.signal);
+    return () => controller.abort();
+  }, [novelId, fetchDetails]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1073,10 +1080,11 @@ export default function NovelDetails({ novelId, onBack, onSelectChapter, onOpenU
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
                     <div>
-                      <label className="mono-xs text-[var(--text-sub)] block mb-2">
+                      <label htmlFor="novel-acoustic-emotional" className="mono-xs text-[var(--text-sub)] block mb-2">
                         EMOTIONAL RANGE [{acousticSettings.emotionalRange}%]
                       </label>
                       <input
+                        id="novel-acoustic-emotional"
                         type="range"
                         min="0"
                         max="100"
@@ -1089,10 +1097,11 @@ export default function NovelDetails({ novelId, onBack, onSelectChapter, onOpenU
                       />
                     </div>
                     <div>
-                      <label className="mono-xs text-[var(--text-sub)] block mb-2">
+                      <label htmlFor="novel-acoustic-breath" className="mono-xs text-[var(--text-sub)] block mb-2">
                         BREATH PHONEME RATE [{acousticSettings.breathRate}%]
                       </label>
                       <input
+                        id="novel-acoustic-breath"
                         type="range"
                         min="0"
                         max="100"
@@ -1105,10 +1114,11 @@ export default function NovelDetails({ novelId, onBack, onSelectChapter, onOpenU
                       />
                     </div>
                     <div>
-                      <label className="mono-xs text-[var(--text-sub)] block mb-2">
+                      <label htmlFor="novel-acoustic-reverb" className="mono-xs text-[var(--text-sub)] block mb-2">
                         ACOUSTIC REVERB [{acousticSettings.reverb}%]
                       </label>
                       <input
+                        id="novel-acoustic-reverb"
                         type="range"
                         min="0"
                         max="100"
@@ -1121,10 +1131,11 @@ export default function NovelDetails({ novelId, onBack, onSelectChapter, onOpenU
                       />
                     </div>
                     <div>
-                      <label className="mono-xs text-[var(--text-sub)] block mb-2">
+                      <label htmlFor="novel-acoustic-pacing" className="mono-xs text-[var(--text-sub)] block mb-2">
                         PACING MULTIPLIER [{(acousticSettings.pacing / 100).toFixed(2)}×]
                       </label>
                       <input
+                        id="novel-acoustic-pacing"
                         type="range"
                         min="80"
                         max="140"
@@ -1213,18 +1224,9 @@ export default function NovelDetails({ novelId, onBack, onSelectChapter, onOpenU
                 return (
                   <div
                     key={ch.id || idx}
-                    role="button"
-                    tabIndex={0}
                     onClick={() => onSelectChapter(novel, ch)}
                     onMouseEnter={preloadReaderView}
-                    onFocus={preloadReaderView}
                     onPointerDown={preloadReaderView}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault();
-                        onSelectChapter(novel, ch);
-                      }
-                    }}
                     className="chapter-row-item cursor-pointer"
                   >
                     <span className="chapter-idx">CH. {String(chNumber).padStart(2, '0')}</span>

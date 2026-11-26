@@ -160,7 +160,13 @@ class SynthesisEventDispatcher extends EventEmitter {
       timestamp: event.timestamp || new Date().toISOString(),
     };
 
-    // Cache in memory
+    // Cache in memory (bounded to 500 chapters)
+    if (this.cachedProgress.has(id)) {
+      this.cachedProgress.delete(id);
+    } else if (this.cachedProgress.size >= 500) {
+      const oldestKey = this.cachedProgress.keys().next().value;
+      if (oldestKey !== undefined) this.cachedProgress.delete(oldestKey);
+    }
     this.cachedProgress.set(id, payload);
 
     // Emit event on EventEmitter
