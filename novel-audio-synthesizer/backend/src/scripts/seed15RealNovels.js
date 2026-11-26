@@ -326,8 +326,13 @@ const NOVELS = [
 
 async function seed() {
   console.log('=== Seeding 15 Real Literary Works into SyncTone Catalog ===');
-  const pool = new Pool({ connectionString: config.databaseUrl });
+  const pool = new Pool({
+    connectionString: config.databaseUrl,
+    ...(config.pgSsl ? { ssl: { rejectUnauthorized: Boolean(config.pgSslRejectUnauthorized) } } : {}),
+  });
   await mongoose.connect(config.mongoUri);
+  const { ensureVoiceCatalog } = require('./seedDemos');
+  await ensureVoiceCatalog(pool);
   console.log('✓ Connected to PostgreSQL and MongoDB');
 
   // 1. Ensure all 14 authors exist in `users`

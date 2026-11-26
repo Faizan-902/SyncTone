@@ -118,12 +118,11 @@ class VoiceProfiler:
         if char_id in self._registry:
             return self._registry[char_id]
 
-        # 2. Narrator special case
-        if char_id in ("", "narrator", "narration", "unresolved"):
-            voice_id = VOICE_PALETTE["narrator"]
-            self._registry[char_id] = voice_id
-            self._save()
-            return voice_id
+        # 2. Narrator / unresolved special cases (never cache "" or "unresolved")
+        if char_id in ("", "unresolved"):
+            return VOICE_PALETTE["narrator"]
+        if char_id in ("narrator", "narration"):
+            return VOICE_PALETTE["narrator"]
 
         # 3. Keyword scan (sorted by length descending with word-boundary matching)
         combined = f"{name} {context_snippet}".lower()
@@ -159,10 +158,7 @@ class VoiceProfiler:
     ) -> list[Segment]:
         """Apply voice IDs to all segments based on their speaker."""
         for seg in segments:
-            voice_id = self.resolve_character_voice(
-                seg.speaker_name,
-                seg.text[:100],  # First 100 chars as context
-            )
+            voice_id = self.resolve_character_voice(seg.speaker_name)
             seg.assigned_voice_id = voice_id
         return segments
 

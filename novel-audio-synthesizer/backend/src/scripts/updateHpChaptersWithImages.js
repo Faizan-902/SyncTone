@@ -9,7 +9,10 @@ async function updateHpChapters() {
   await mongoose.connect(config.mongoUri);
   console.log('✔ Connected to MongoDB');
 
-  const pool = new Pool({ connectionString: config.databaseUrl });
+  const pool = new Pool({
+    connectionString: config.databaseUrl,
+    ...(config.pgSsl ? { ssl: { rejectUnauthorized: Boolean(config.pgSslRejectUnauthorized) } } : {}),
+  });
   console.log('✔ Connected to PostgreSQL');
 
   const novelId = '2361aae1-bd74-4e82-b33d-d62ab5fa9e2f';
@@ -47,7 +50,7 @@ async function updateHpChapters() {
     }
 
     let existingProseIdx = 0;
-    const existingSegs = existingDoc.segments || [];
+    const existingSegs = (existingDoc.segments || []).filter((seg) => seg && seg.type !== 'image');
     const mergedSegments = [];
     const timeline = [];
 
@@ -90,22 +93,24 @@ async function updateHpChapters() {
         });
         totalUpdatedImages++;
       } else {
-        const exist = existingSegs[existingProseIdx++];
+        const exist = existingSegs[existingProseIdx++] || {};
         const proseSeg = {
           ...exist,
           order,
           segment_id: order,
           text: s.text,
           type: s.type,
+          voice_id: exist.voice_id || narratorVoiceId,
+          assigned_voice_id: exist.assigned_voice_id || exist.voice_id || narratorVoiceId,
         };
         mergedSegments.push(proseSeg);
         timeline.push({
           order,
           segment_id: order,
-          start_ms: exist ? exist.start_ms : 0,
-          end_ms: exist ? exist.end_ms : 0,
-          character_id: exist?.character_id || null,
-          voice_id: exist?.voice_id || narratorVoiceId,
+          start_ms: exist.start_ms || 0,
+          end_ms: exist.end_ms || 0,
+          character_id: exist.character_id || narratorCharId || 'narrator',
+          voice_id: proseSeg.voice_id,
           text: s.text,
           type: s.type,
           image_url: null,

@@ -88,29 +88,104 @@ class HeadlessWorker:
         try:
             target_chapter_id = job.chapter_id
             if not target_chapter_id and job.job_type == "synthesize_chapter":
-                target = db.scalar(select(ChapterSynthesisJobTarget).where(ChapterSynthesisJobTarget.job_id == job.id))
+                target = await asyncio.to_thread(
+                    db.scalar,
+                    select(ChapterSynthesisJobTarget).where(ChapterSynthesisJobTarget.job_id == job.id),
+                )
                 target_chapter_id = target.chapter_id if target else None
 
             logger.info(f"[{self.worker_id}] Processing job {job.id} (chapter: {target_chapter_id})...")
             job.progress_pct = 20.0
-            db.commit()
+            await asyncio.to_thread(db.commit)
 
-            # Placeholder for segment synthesis loop
-            await asyncio.sleep(1.0)
-            job.progress_pct = 80.0
-            db.commit()
+            if self.tts is None or self.stitcher is None:
+                raise RuntimeError("TTS engine or audio stitcher is unavailable in Python worker")
+            if not target_chapter_id:
+                raise ValueError(f"Synthesis job {job.id} has no target chapter_id")
 
-            await asyncio.sleep(0.5)
-            job.progress_pct = 100.0
-            job.status = "completed"
-            job.completed_at = datetime.now(timezone.utc)
-            db.commit()
+            model_status = await self.tts.check_model_available()
+            if not (model_status.get("model_exists") and model_status.get("voices_exists")):
+                raise FileNotFoundError(
+                    f"Kokoro model files unavailable: {model_status.get('model_path')}"
+                )
+
+            segment_loader = getattr(self, "get_chapter_segments", None)
+            if not callable(segment_loader):
+                raise RuntimeError(
+                    "Python worker has no configured chapter segment source (use Node synthesis pipeline or configure get_chapter_segments)"
+                )
+
+            segments = await segment_loader(target_chapter_id)
+            if not segments:
+                raise ValueError(f"No segments found for chapter {target_chapter_id}")
+
+            stitched_inputs = []
+            total = len(segments)
+            for idx, seg in enumerate(segments):
+                seg_id = seg.get("segment_id", idx) if isinstance(seg, dict) else getattr(seg, "segment_id", idx)
+                seg_text = seg.get("text", "") if isinstance(seg, dict) else getattr(seg, "text", "")
+                voice_id = (
+                    seg.get("assigned_voice_id") or seg.get("voice_id")
+                    if isinstance(seg, dict)
+                    else getattr(seg, "assigned_voice_id", None)
+                ) or "af_heart"
+                speaker_name = (
+                    seg.get("speaker_name") or "Narrator"
+                    if isinstance(seg, dict)
+                    else getattr(seg, "speaker_name", None) or "Narrator"
+                )
+                samples, _duration_ms = await self.tts.synthesize_segment(
+                    text=seg_text,
+                    voice_id=voice_id,
+                )
+                stitched_inputs.append(
+                    {
+                        "segment_id": seg_id,
+                        "voice_id": voice_id,
+                        "speaker_name": speaker_name,
+                        "pcm_samples": samples,
+                    }
+                )
+                job.progress_pct = 20.0 + (60.0 * (idx + 1) / total)
+                await asyncio.to_thread(db.commit)
+
+            from pathlib import Path
+            from app.core.config import settings
+
+            output_dir = settings.resolve_path(settings.AUDIO_OUTPUT_DIR)
+            manifest = await asyncio.to_thread(
+                self.stitcher.stitch,
+                stitched_inputs,
+                Path(output_dir),
+                str(target_chapter_id),
+            )
+
+            def _complete_job_and_chapter():
+                chapter = db.get(Chapter, target_chapter_id)
+                if chapter is not None:
+                    chapter.status = "completed"
+                    chapter.swift_audio_object = manifest.audio_url
+                    chapter.total_duration_ms = int(manifest.total_duration_ms)
+                job.progress_pct = 100.0
+                job.status = "completed"
+                job.completed_at = datetime.now(timezone.utc)
+                db.commit()
+
+            await asyncio.to_thread(_complete_job_and_chapter)
             logger.info(f"[{self.worker_id}] Successfully completed job {job.id}")
         except Exception as e:
             logger.error(f"[{self.worker_id}] Job {job.id} failed: {e}")
-            job.status = "failed"
-            job.error_message = str(e)
-            db.commit()
+            try:
+                await asyncio.to_thread(db.rollback)
+                job.status = "failed"
+                job.error_message = str(e)
+                await asyncio.to_thread(db.commit)
+            except Exception as commit_err:
+                logger.error(f"[{self.worker_id}] Failed to mark job {job.id} failed: {commit_err}")
+                try:
+                    await asyncio.to_thread(db.rollback)
+                except Exception:
+                    pass
 
     async def run(self, poll_interval_sec: float = 3.0):
         """Main daemon loop."""

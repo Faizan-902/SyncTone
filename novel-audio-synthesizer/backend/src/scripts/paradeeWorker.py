@@ -75,9 +75,19 @@ def ensure_short_espeak_data_path() -> str:
     if len(orig_dp) > 130:
         short_dp = "/tmp/espeak-ng-data"
         if os.path.islink(short_dp):
-            os.unlink(short_dp)
+            try:
+                os.unlink(short_dp)
+            except OSError:
+                pass
         if not os.path.exists(short_dp):
-            shutil.copytree(orig_dp, short_dp, symlinks=True)
+            import tempfile
+            tmp_dp = tempfile.mkdtemp(prefix="espeak_tmp_", dir="/tmp")
+            try:
+                shutil.rmtree(tmp_dp, ignore_errors=True)
+                shutil.copytree(orig_dp, tmp_dp, symlinks=True)
+                os.replace(tmp_dp, short_dp)
+            except OSError:
+                shutil.rmtree(tmp_dp, ignore_errors=True)
         return short_dp
     return orig_dp
 
@@ -147,12 +157,27 @@ class ParadeeSynthesizer:
         chunks = []
         curr = ""
         for s in sentences:
-            if len(curr) + len(s) + 1 <= 280:
+            if len(s) > 280:
+                if curr:
+                    chunks.append(curr)
+                    curr = ""
+                words = s.split()
+                part = ""
+                for w in words:
+                    if len(part) + len(w) + 1 <= 280:
+                        part = f"{part} {w}".strip() if part else w
+                    else:
+                        if part:
+                            chunks.append(part)
+                        part = w[:280]
+                if part:
+                    curr = part
+            elif len(curr) + len(s) + 1 <= 280:
                 curr = f"{curr} {s}".strip() if curr else s
             else:
                 if curr:
                     chunks.append(curr)
-                curr = s[:280]
+                curr = s
         if curr:
             chunks.append(curr)
 
@@ -209,6 +234,7 @@ def main() -> int:
             line = line.strip()
             if not line:
                 continue
+            req = None
             try:
                 req = json.loads(line)
                 req_id = req.get("id")

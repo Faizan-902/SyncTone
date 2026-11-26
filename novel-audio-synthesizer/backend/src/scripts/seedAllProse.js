@@ -4,7 +4,10 @@ const mongoose = require('mongoose');
 const { config } = require('../config');
 
 async function seedAllProse() {
-  const pool = new Pool({ connectionString: config.databaseUrl });
+  const pool = new Pool({
+    connectionString: config.databaseUrl,
+    ...(config.pgSsl ? { ssl: { rejectUnauthorized: Boolean(config.pgSslRejectUnauthorized) } } : {}),
+  });
   await mongoose.connect(config.mongoUri);
   console.log('Connected to PG and MongoDB');
 

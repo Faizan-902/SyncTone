@@ -61,7 +61,7 @@ def clean_ocr_disclaimers(raw_text: str) -> str:
     clean = re.sub(r'(?i)Created with hocr-to-epub[^\n]*', '', clean)
     clean = re.sub(r'(?i)hocr-to-epub[^\n]*', '', clean)
     clean = re.sub(r'(?im)^\s*Notice\s*[:\.]?\s*$', '', clean)
-    clean = re.sub(r'(?:Addeddate|Boxid|Camera|Collection_set|External-identifier|Foldoutcount|Identifier|Invoice|Ocr|Ocr_detected_lang|Ocr_module_version|Page_number_confidence|Pages|Scanner)\s+[:=]?\s*.*', '', clean, flags=re.IGNORECASE)
+    clean = re.sub(r'(?im)^[ \t]*(?:Addeddate|Boxid|Camera|Collection_set|External-identifier|Foldoutcount|Identifier|Invoice|Ocr|Ocr_detected_lang|Ocr_module_version|Page_number_confidence|Pages|Scanner)[ \t]*[:=][ \t]*.*$', '', clean)
     # Strip non-Latin OCR garbage (Urdu/Arabic scan artifacts from IA scans)
     clean = re.sub(r'[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF\u200e\u200f\u200b\u200c\u200d]+', ' ', clean)
     # Repair common hOCR ligature and drop-cap scan corruptions
@@ -76,7 +76,7 @@ def strip_html_tags(raw_html: str) -> str:
     """Removes HTML markup while preserving paragraph structure and inline image markers."""
     if not raw_html:
         return ""
-    clean = clean_ocr_disclaimers(raw_html)
+    clean = raw_html
     clean = re.sub(r'(?is)<head.*?>.*?</head>', ' ', clean)
     clean = re.sub(r'(?is)<title.*?>.*?</title>', ' ', clean)
     clean = re.sub(r'(?is)<script.*?>.*?</script>', ' ', clean)
@@ -87,6 +87,7 @@ def strip_html_tags(raw_html: str) -> str:
     clean = re.sub(r'(?is)</(p|div|li|tr|section|article)>', '\n\n', clean)
     clean = re.sub(r'<[^>]+>', ' ', clean)
     clean = html.unescape(clean)
+    clean = clean_ocr_disclaimers(clean)
     lines = [re.sub(r'[ \t]+', ' ', l).strip() for l in clean.splitlines()]
     collapsed = []
     prev_blank = False
@@ -160,7 +161,7 @@ def split_by_chapter_headings(text: str):
 
     # Generic chapter headings: Chapter 1, CHAPTER II, GHAPTER ONE, PART 1, etc.
     heading_pattern = re.compile(
-        r'(?:^|\n)[ \t]*(?:#+\s*)?(?:CHAPTER|Chapter|GHAPTER|Ghapter|G\s*HAPTER|ACT|Act|PART|Part|BOOK|Book)\s+([IVXLCDM\d]+|[A-Za-z]+|[0-9]+)(?:[:.\-—\s]+([^\n]*))?',
+        r'(?:^|\n)[ \t]*(?:#+\s*)?(?:CHAPTER|Chapter|GHAPTER|Ghapter|G\s*HAPTER|ACT|Act|PART|Part|BOOK|Book)\s+([IVXLCDM]+|\d+|' + word_nums_pattern + r')(?=\b)(?:[:.\-—\s]+([^\n]*))?',
         re.IGNORECASE
     )
 
@@ -317,9 +318,9 @@ def parse_epub(file_path: str, original_filename: str = ""):
 
     epub_hash = hashlib.md5(file_path.encode()).hexdigest()[:8]
 
-    # Pre-check: is this Harry Potter?
+    # Pre-check: only match exact Harry Potter Book 1 (Philosopher's/Sorcerer's Stone)
     check_name = (file_path + " " + original_filename).lower()
-    if 'harry potter' in check_name or 'philosopher' in check_name or 'minalima' in check_name:
+    if 'harry potter' in check_name and ('philosopher' in check_name or 'sorcerer' in check_name):
         hp_cached = load_hp1_extracted_if_present()
         if hp_cached:
             return hp_cached
@@ -343,8 +344,8 @@ def parse_epub(file_path: str, original_filename: str = ""):
         desc_el = opf.find('.//{*}description')
         synopsis = desc_el.text.strip() if desc_el is not None and desc_el.text else ""
 
-        # Secondary check for HP in metadata
-        if 'harry potter' in raw_title.lower() or 'philosopher' in raw_title.lower():
+        # Secondary check for exact HP1 in metadata
+        if 'harry potter' in raw_title.lower() and ('philosopher' in raw_title.lower() or 'sorcerer' in raw_title.lower()):
             hp_cached = load_hp1_extracted_if_present()
             if hp_cached:
                 return hp_cached
@@ -355,8 +356,10 @@ def parse_epub(file_path: str, original_filename: str = ""):
         for item in opf.findall('.//{*}manifest/{*}item'):
             item_id = item.attrib.get('id', '')
             item_href = item.attrib.get('href', '')
+            media_type = item.attrib.get('media-type', '').lower()
             props = item.attrib.get('properties', '').lower()
-            if 'cover-image' in props or 'cover' in item_id.lower():
+            is_img_item = media_type.startswith('image/') or item_href.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.gif'))
+            if is_img_item and ('cover-image' in props or 'cover' in item_id.lower()):
                 cover_manifest_href = item_href
 
             if item_id and item_href:
