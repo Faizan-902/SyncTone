@@ -60,6 +60,26 @@ export default function AudioVisualizer({
     };
   }, [audioElement]);
 
+  useEffect(() => {
+    if (isPlaying && audioCtxRef.current?.state === 'suspended') {
+      audioCtxRef.current.resume?.().catch(() => {});
+    }
+  }, [isPlaying]);
+
+  useEffect(() => {
+    return () => {
+      if (audioCtxRef.current) {
+        try {
+          audioCtxRef.current.close?.().catch?.(() => {});
+        } catch (_) {}
+        audioCtxRef.current = null;
+        analyserRef.current = null;
+        sourceRef.current = null;
+        dataArrayRef.current = null;
+      }
+    };
+  }, []);
+
   // Main Render Loop
   useEffect(() => {
     const canvas = canvasRef.current;

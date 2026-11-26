@@ -70,8 +70,14 @@ export default function AudioPlayer({
   onToggleFollowAlong,
   isBuffering: propIsBuffering,
   error: propError,
+  speed: propSpeed,
 }) {
-  const [speed, setSpeed] = useState(1.0);
+  const [speed, setSpeed] = useState(propSpeed || 1.0);
+  useEffect(() => {
+    if (typeof propSpeed === 'number' && propSpeed > 0) {
+      setSpeed(propSpeed);
+    }
+  }, [propSpeed]);
   const [volume, setVolume] = useState(1.0);
   const [isMuted, setIsMuted] = useState(false);
   const [showVolumeSlider, setShowVolumeSlider] = useState(false);
@@ -171,20 +177,6 @@ export default function AudioPlayer({
     setHoverTimeMs(null);
   };
 
-  const handleKeyDown = (e) => {
-    if (!audioRef?.current) return;
-    if (e.key === 'ArrowLeft') {
-      e.preventDefault();
-      audioRef.current.currentTime = Math.max(0, audioRef.current.currentTime - 5);
-    } else if (e.key === 'ArrowRight') {
-      e.preventDefault();
-      audioRef.current.currentTime = Math.min(totalDurationMs / 1000, audioRef.current.currentTime + 5);
-    } else if (e.key === ' ') {
-      e.preventDefault();
-      onToggle();
-    }
-  };
-
   const handleSkip = useCallback(
     (seconds) => {
       if (playbackMode === 'tts') {
@@ -211,13 +203,32 @@ export default function AudioPlayer({
         onSeekSegment(seconds < 0 ? -1 : 1);
         return;
       }
-      audioRef.current.currentTime = Math.max(
+      const targetMs = Math.max(
         0,
-        Math.min(totalDurationMs / 1000, audioRef.current.currentTime + seconds)
+        Math.min(totalDurationMs, Math.round((audioRef.current.currentTime + seconds) * 1000))
       );
+      if (onSeek) {
+        onSeek(targetMs, isPlaying);
+      } else {
+        audioRef.current.currentTime = targetMs / 1000;
+      }
     },
     [audioRef, totalDurationMs, playbackMode, onSeekSegment, onSeek, currentTimeMs, isPlaying]
   );
+
+  const handleKeyDown = (e) => {
+    if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      handleSkip(-5);
+    } else if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      handleSkip(5);
+    } else if (e.key === ' ' || e.code === 'Space') {
+      e.preventDefault();
+      e.stopPropagation();
+      onToggle?.();
+    }
+  };
 
   const handleSpeedChange = () => {
     const currentIdx = SPEED_OPTIONS.indexOf(speed);
@@ -272,9 +283,9 @@ export default function AudioPlayer({
         return;
       }
 
-      // 2. Avoid double-triggering Space on focused buttons or links
+      // 2. Avoid double-triggering Space on focused buttons, links, or interactive sliders
       if (e.code === 'Space' || e.key === ' ') {
-        if (tagName === 'button' || tagName === 'a') {
+        if (tagName === 'button' || tagName === 'a' || target?.getAttribute?.('role') === 'slider') {
           return;
         }
         e.preventDefault();
@@ -334,7 +345,11 @@ export default function AudioPlayer({
         handleSkip(details?.seekOffset || 10);
       });
       navigator.mediaSession.setActionHandler('seekto', (details) => {
-        if (audioRef?.current && details?.seekTime !== undefined) {
+        if (details?.seekTime === undefined) return;
+        const targetMs = Math.max(0, Math.round(details.seekTime * 1000));
+        if (onSeek) {
+          onSeek(targetMs, isPlaying);
+        } else if (audioRef?.current) {
           audioRef.current.currentTime = details.seekTime;
         }
       });
@@ -349,7 +364,7 @@ export default function AudioPlayer({
         navigator.mediaSession.setActionHandler('seekto', null);
       } catch (_) {}
     };
-  }, [isPlaying, onToggle, currentNovel, currentChapter, audioRef, handleSkip]);
+  }, [isPlaying, onToggle, currentNovel, currentChapter, audioRef, handleSkip, onSeek]);
 
   // Persist playback position to localStorage for Continue Listening (Section 12.B)
   useEffect(() => {

@@ -167,12 +167,12 @@ export function useSynthesisProgress(chapterId) {
       wsRef.current = ws;
 
       ws.onopen = () => {
+        if (wsRef.current !== ws || !isMountedRef.current) return;
         openedOnce = true;
-        if (!isMountedRef.current) return;
         setProgressState((prev) => ({ ...prev, isConnected: true }));
 
         pingIntervalRef.current = setInterval(() => {
-          if (ws.readyState === WebSocket.OPEN) {
+          if (wsRef.current === ws && ws.readyState === WebSocket.OPEN) {
             try {
               ws.send('ping');
             } catch (_) {}
@@ -181,7 +181,7 @@ export function useSynthesisProgress(chapterId) {
       };
 
       ws.onmessage = (event) => {
-        if (!isMountedRef.current) return;
+        if (wsRef.current !== ws || !isMountedRef.current) return;
         if (event.data === 'pong') return;
 
         try {
@@ -191,7 +191,7 @@ export function useSynthesisProgress(chapterId) {
       };
 
       ws.onerror = () => {
-        if (!isMountedRef.current) return;
+        if (wsRef.current !== ws || !isMountedRef.current) return;
         setProgressState((prev) => ({ ...prev, isConnected: false }));
         if (!openedOnce) {
           startHttpFallback(chapterId);
@@ -199,7 +199,7 @@ export function useSynthesisProgress(chapterId) {
       };
 
       ws.onclose = () => {
-        if (!isMountedRef.current) return;
+        if (wsRef.current !== ws || !isMountedRef.current) return;
         clearInterval(pingIntervalRef.current);
         setProgressState((prev) => ({ ...prev, isConnected: false }));
       };
@@ -208,8 +208,23 @@ export function useSynthesisProgress(chapterId) {
     }
   }, [chapterId, applyProgressPayload, startHttpFallback]);
 
+  const reset = useCallback(() => {
+    setProgressState({
+      status: 'idle',
+      percentComplete: 0,
+      currentSegment: null,
+      totalSegments: null,
+      message: '',
+      error: null,
+      isConnected: false,
+      isComplete: false,
+      isFailed: false,
+    });
+  }, []);
+
   useEffect(() => {
     isMountedRef.current = true;
+    reset();
     if (chapterId) {
       connect();
     }
@@ -225,26 +240,14 @@ export function useSynthesisProgress(chapterId) {
         } catch (_) {}
       }
       if (wsRef.current) {
+        const closingWs = wsRef.current;
+        wsRef.current = null;
         try {
-          wsRef.current.close();
+          closingWs.close();
         } catch (_) {}
       }
     };
-  }, [chapterId, connect]);
-
-  const reset = useCallback(() => {
-    setProgressState({
-      status: 'idle',
-      percentComplete: 0,
-      currentSegment: null,
-      totalSegments: null,
-      message: '',
-      error: null,
-      isConnected: false,
-      isComplete: false,
-      isFailed: false,
-    });
-  }, []);
+  }, [chapterId, connect, reset]);
 
   return {
     ...progressState,

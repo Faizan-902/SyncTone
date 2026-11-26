@@ -189,6 +189,10 @@ export default function OpenGLPageReader({
   const anchorSegmentIdRef = useRef(null);
   const autoFlipLockRef = useRef(false);
   const autoFlipTimerRef = useRef(null);
+  const flipTimerRef = useRef(null);
+  const transitionResetTimerRef = useRef(null);
+  const onNextChapterRef = useRef(onNextChapter);
+  onNextChapterRef.current = onNextChapter;
   const lastAutoFlippedSegRef = useRef(-1);
   const currentSpreadIndexRef = useRef(currentSpreadIndex);
   currentSpreadIndexRef.current = currentSpreadIndex;
@@ -196,12 +200,21 @@ export default function OpenGLPageReader({
   const prevIsFollowingAlongRef = useRef(isFollowingAlong);
   const lastWheelTurnRef = useRef(0);
 
-  // Reset spread & timers when chapter changes
+  // Reset spread, anchor & timers when chapter changes
   useEffect(() => {
     chapterTransitioningRef.current = false;
+    anchorSegmentIdRef.current = null;
     if (autoFlipTimerRef.current) {
       clearTimeout(autoFlipTimerRef.current);
       autoFlipTimerRef.current = null;
+    }
+    if (flipTimerRef.current) {
+      clearTimeout(flipTimerRef.current);
+      flipTimerRef.current = null;
+    }
+    if (transitionResetTimerRef.current) {
+      clearTimeout(transitionResetTimerRef.current);
+      transitionResetTimerRef.current = null;
     }
     autoFlipLockRef.current = false;
     lastAutoFlippedSegRef.current = -1;
@@ -211,12 +224,20 @@ export default function OpenGLPageReader({
     setShowCoverSpread(false);
   }, [currentChapter?.id, currentChapter?.chapter_number]);
 
-  // Clear auto-flip timer strictly on unmount
+  // Clear timers strictly on unmount
   useEffect(() => {
     return () => {
       if (autoFlipTimerRef.current) {
         clearTimeout(autoFlipTimerRef.current);
         autoFlipTimerRef.current = null;
+      }
+      if (flipTimerRef.current) {
+        clearTimeout(flipTimerRef.current);
+        flipTimerRef.current = null;
+      }
+      if (transitionResetTimerRef.current) {
+        clearTimeout(transitionResetTimerRef.current);
+        transitionResetTimerRef.current = null;
       }
       autoFlipLockRef.current = false;
     };
@@ -443,24 +464,30 @@ export default function OpenGLPageReader({
 
   // Turn to Next Spread
   const handleNextPage = useCallback(() => {
+    const scheduleFlipReset = () => {
+      if (flipTimerRef.current) clearTimeout(flipTimerRef.current);
+      flipTimerRef.current = setTimeout(() => setIsFlipping(false), 280);
+    };
+
     if (currentSpreadIndexRef.current === 0 && showCoverSpread) {
       if (isPlaying) setIsUserBrowsingSpreads(true);
       setShowCoverSpread(false);
       setFlipDirection('next');
       setIsFlipping(true);
-      setTimeout(() => setIsFlipping(false), 280);
+      scheduleFlipReset();
       return;
     }
     if (currentSpreadIndexRef.current >= totalSpreads - 1) {
-      if (nextChapter && onNextChapter && !chapterTransitioningRef.current) {
+      if (nextChapter && onNextChapterRef.current && !chapterTransitioningRef.current) {
         chapterTransitioningRef.current = true;
         setFlipDirection('next');
         setIsFlipping(true);
-        setTimeout(() => setIsFlipping(false), 280);
-        setTimeout(() => {
+        scheduleFlipReset();
+        if (transitionResetTimerRef.current) clearTimeout(transitionResetTimerRef.current);
+        transitionResetTimerRef.current = setTimeout(() => {
           chapterTransitioningRef.current = false;
         }, 1200);
-        onNextChapter();
+        onNextChapterRef.current();
       }
       return;
     }
@@ -471,21 +498,25 @@ export default function OpenGLPageReader({
     setLastJumpPage(isSingleLayout ? prev + 1 : prev * 2 + 1);
     setFlipDirection('next');
     setIsFlipping(true);
-    setTimeout(() => setIsFlipping(false), 280);
+    scheduleFlipReset();
     setCurrentSpreadIndex(nextIdx);
     currentSpreadIndexRef.current = nextIdx;
     updateAnchorForSpread(nextIdx);
-  }, [totalSpreads, showCoverSpread, nextChapter, onNextChapter, isSingleLayout, isPlaying, updateAnchorForSpread]);
+  }, [totalSpreads, showCoverSpread, nextChapter, isSingleLayout, isPlaying, updateAnchorForSpread]);
 
   // Turn to Previous Spread (Fixes previous page button bug on Spread 0 and cover transitions)
   const handlePrevPage = useCallback(() => {
+    const scheduleFlipReset = () => {
+      if (flipTimerRef.current) clearTimeout(flipTimerRef.current);
+      flipTimerRef.current = setTimeout(() => setIsFlipping(false), 280);
+    };
     if (currentSpreadIndexRef.current === 0) {
       if (!showCoverSpread && currentNovel?.cover_object) {
         if (isPlaying) setIsUserBrowsingSpreads(true);
         setShowCoverSpread(true);
         setFlipDirection('prev');
         setIsFlipping(true);
-        setTimeout(() => setIsFlipping(false), 280);
+        scheduleFlipReset();
       }
       return;
     }
@@ -495,7 +526,7 @@ export default function OpenGLPageReader({
     setLastJumpPage(isSingleLayout ? prev + 1 : prev * 2 + 1);
     setFlipDirection('prev');
     setIsFlipping(true);
-    setTimeout(() => setIsFlipping(false), 280);
+    scheduleFlipReset();
     setCurrentSpreadIndex(prevIdx);
     currentSpreadIndexRef.current = prevIdx;
     updateAnchorForSpread(prevIdx);
@@ -512,7 +543,8 @@ export default function OpenGLPageReader({
       setLastJumpPage(isSingleLayout ? curSpread + 1 : curSpread * 2 + 1);
       setFlipDirection(targetSpread > curSpread ? 'next' : 'prev');
       setIsFlipping(true);
-      setTimeout(() => {
+      if (flipTimerRef.current) clearTimeout(flipTimerRef.current);
+      flipTimerRef.current = setTimeout(() => {
         setCurrentSpreadIndex(targetSpread);
         currentSpreadIndexRef.current = targetSpread;
         updateAnchorForSpread(targetSpread);
