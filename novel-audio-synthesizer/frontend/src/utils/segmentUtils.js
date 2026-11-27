@@ -19,3 +19,28 @@ export function parseSegmentImage(seg) {
 
   return { imgUrl, cleanText };
 }
+
+/**
+ * Fallback handler for cover and chapter illustration URLs so `/static/covers/...`
+ * and `/covers/...` seamlessly cross-retry before hiding/falling back.
+ */
+export function handleCoverImageError(e, onFinalFailure) {
+  const img = e?.currentTarget;
+  if (!img) return;
+  const src = img.getAttribute('src') || '';
+  if (!img.dataset.fallbackTried) {
+    img.dataset.fallbackTried = '1';
+    if (src.startsWith('/static/covers/')) {
+      img.src = src.replace('/static/covers/', '/covers/');
+      return;
+    }
+    if (src.startsWith('/covers/')) {
+      img.src = src.replace('/covers/', '/static/covers/');
+      return;
+    }
+  }
+  img.style.display = 'none';
+  if (typeof onFinalFailure === 'function') {
+    onFinalFailure(img);
+  }
+}

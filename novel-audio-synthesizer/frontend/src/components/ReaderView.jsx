@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { getSpeakerColor } from '../utils/speakerColors';
-import { parseSegmentImage } from '../utils/segmentUtils';
+import { parseSegmentImage, handleCoverImageError } from '../utils/segmentUtils';
 import { formatNovelAuthor } from '../utils/authorDisplay';
 import { useTheme } from '../context/ThemeContext';
 import { sanitizeSegmentsWithTtsDomCleaner } from '../utils/ttsSanitizer';
@@ -404,9 +404,7 @@ export default function ReaderView({
           src={imgUrl}
           alt="Book illustration"
           className="my-4 mx-auto max-h-72 rounded-xl border border-white/15 shadow-lg object-contain"
-          onError={(e) => {
-            e.currentTarget.style.display = 'none';
-          }}
+          onError={(e) => handleCoverImageError(e)}
         />
       </div>
     ) : null;

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useTheme } from '../context/ThemeContext';
 import { getSpeakerColor } from '../utils/speakerColors';
-import { parseSegmentImage } from '../utils/segmentUtils';
+import { parseSegmentImage, handleCoverImageError } from '../utils/segmentUtils';
 import { measureAndPaginateSegments } from '../utils/readerLayoutEngine';
 import NovelCover from './NovelCover';
 import { paginateSegments } from '../reader/paginate';
@@ -616,9 +616,7 @@ export default function OpenGLPageReader({
             src={imgUrl}
             alt="Book illustration"
             className="max-h-[480px] sm:max-h-[540px] w-auto mx-auto rounded-lg shadow-md object-contain"
-            onError={(e) => {
-              e.currentTarget.style.display = 'none';
-            }}
+            onError={(e) => handleCoverImageError(e)}
           />
         </div>
       );
@@ -630,9 +628,7 @@ export default function OpenGLPageReader({
           src={imgUrl}
           alt="Book illustration"
           className="my-4 mx-auto max-h-72 rounded-xl border border-white/15 shadow-lg object-contain"
-          onError={(e) => {
-            e.currentTarget.style.display = 'none';
-          }}
+          onError={(e) => handleCoverImageError(e)}
         />
       </div>
     ) : null;
@@ -1000,12 +996,11 @@ export default function OpenGLPageReader({
                           src={currentNovel.cover_object}
                           alt={currentNovel?.title || 'Book Cover Artwork'}
                           className="w-full h-full object-cover rounded-xl shadow-inner mx-auto"
-                          onError={(e) => {
-                            e.currentTarget.style.display = 'none';
-                            if (e.currentTarget.nextElementSibling) {
-                              e.currentTarget.nextElementSibling.style.display = 'block';
+                          onError={(e) => handleCoverImageError(e, (img) => {
+                            if (img.nextElementSibling) {
+                              img.nextElementSibling.style.display = 'block';
                             }
-                          }}
+                          })}
                         />
                       ) : isHarryPotter ? (
                         <img
