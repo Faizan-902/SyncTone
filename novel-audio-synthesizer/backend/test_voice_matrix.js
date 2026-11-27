@@ -466,7 +466,8 @@ async function runVoiceMatrixTests() {
     // -------------------------------------------------------------------------
     console.log('▶ [Test 6] Testing GET/POST /api/status/parser-config, POST /api/voices/assign & POST /api/parse/:chapter_id...');
 
-    const parserConfigPath = path.join(config.paths.outputDir, 'parser_config.json');
+    const statusRouter = require('./src/routes/status');
+    const parserConfigPath = statusRouter.getParserConfigPath();
     const hadParserConfig = fs.existsSync(parserConfigPath);
     const prevParserConfigRaw = hadParserConfig ? fs.readFileSync(parserConfigPath, 'utf-8') : null;
 
@@ -487,10 +488,31 @@ async function runVoiceMatrixTests() {
       assert.ok(cfgGet1.data.ollama, 'parser-config must include ollama section');
       assert.ok(cfgGet1.data.ocr, 'parser-config must include ocr section');
 
-      const cfgPost = await axios.post(`${baseUrl}/status/parser-config`, {
+      // Verify unauthenticated POST /api/status/parser-config rejects with 401
+      const unauthCfgPost = await axios.post(`${baseUrl}/status/parser-config`, {
         activeEngine: 'heuristic',
-        heuristic: { sensitivity: 'aggressive', turnTaking: true, quoteStyle: 'auto' },
+      }, { validateStatus: () => true });
+      assert.strictEqual(unauthCfgPost.status, 401);
+
+      // Register & authenticate writer session for writer-protected parser-config mutation
+      const vmWriterEmail = `vm_writer_${Date.now()}@example.com`;
+      const regResp = await axios.post(`${baseUrl}/auth/register`, {
+        username: `vm_writer_${Date.now()}`,
+        email: vmWriterEmail,
+        password: 'TestPassword123!',
+        role: 'writer',
       });
+      const setCookie = regResp.headers['set-cookie'];
+      const writerCookie = Array.isArray(setCookie) ? setCookie.map((c) => c.split(';')[0]).join('; ') : '';
+
+      const cfgPost = await axios.post(
+        `${baseUrl}/status/parser-config`,
+        {
+          activeEngine: 'heuristic',
+          heuristic: { sensitivity: 'aggressive', turnTaking: true, quoteStyle: 'auto' },
+        },
+        { headers: { Cookie: writerCookie } }
+      );
       assert.strictEqual(cfgPost.status, 200);
       assert.strictEqual(cfgPost.data.ok, true);
       assert.strictEqual(cfgPost.data.config.heuristic.sensitivity, 'aggressive');
@@ -498,6 +520,8 @@ async function runVoiceMatrixTests() {
       const cfgGet2 = await axios.get(`${baseUrl}/status/parser-config`);
       assert.strictEqual(cfgGet2.data.heuristic.sensitivity, 'aggressive');
       console.log('  ✔ GET/POST /api/status/parser-config verified');
+
+      await pool.query('DELETE FROM users WHERE email = $1', [vmWriterEmail]).catch(() => {});
 
       if (mongoose.connection.readyState === 1) {
         await pool.query(

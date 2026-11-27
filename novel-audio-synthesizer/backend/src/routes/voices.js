@@ -187,8 +187,10 @@ async function handleSpeak(req, res) {
       cleanText = ' ';
     }
 
+    const rawPitchSt = parseFloat(req.query.pitch_st ?? req.body?.pitch_st);
+    const pitchOffsetSt = Number.isFinite(rawPitchSt) ? Math.max(-6, Math.min(6, rawPitchSt)) : 0;
     const explicitVoice = req.query.explicit_voice === 'true' || req.body?.explicit_voice === true;
-    const cacheKey = `${engine}:${voice_id}:${novel_id}:${chapter_id}:${characterId}:${speakerName}:${isNarrator}:${castSlot ?? ''}:${explicitVoice}:${speed}:${cleanText}`;
+    const cacheKey = `${engine}:${voice_id}:${novel_id}:${chapter_id}:${characterId}:${speakerName}:${isNarrator}:${castSlot ?? ''}:${explicitVoice}:${speed}:${pitchOffsetSt}:${cleanText}`;
     if (speakCache.has(cacheKey)) {
       if (clientDisconnected || res.writableEnded || res.destroyed) {
         return;
@@ -216,6 +218,7 @@ async function handleSpeak(req, res) {
           gender,
           castPlan,
           explicitVoice,
+          pitchOffsetSt,
           novelId: novel_id,
           chapterId: chapter_id,
         });
@@ -319,6 +322,7 @@ router.post('/voices/assign', optionalAuth, async (req, res) => {
   const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const isUuid = UUID_PATTERN.test(String(character_id));
   let canonicalName = null;
+  let isNarratorChar = String(character_id).trim().toLowerCase() === 'narrator';
   let pgCharUuid = isUuid ? String(character_id) : null;
   let targetNovelId = typeof novel_id === 'string' && UUID_PATTERN.test(novel_id) ? novel_id : null;
 
@@ -334,19 +338,23 @@ router.post('/voices/assign', optionalAuth, async (req, res) => {
       "(LOWER(canonical_name) = LOWER($2) OR TRIM(BOTH '_' FROM REGEXP_REPLACE(LOWER(canonical_name), '[^a-z0-9]+', '_', 'g')) = LOWER($2))";
 
     if (isUuid) {
-      const charRow = await pool.query('SELECT id, canonical_name, novel_id FROM characters WHERE id = $1::uuid', [character_id]);
+      const charRow = await pool.query('SELECT id, canonical_name, novel_id, is_narrator FROM characters WHERE id = $1::uuid', [character_id]);
       if (charRow.rows.length > 0) {
         canonicalName = charRow.rows[0].canonical_name;
+        isNarratorChar = isNarratorChar || Boolean(charRow.rows[0].is_narrator);
         if (!targetNovelId) targetNovelId = charRow.rows[0].novel_id;
       }
     } else if (targetNovelId) {
       const charRow = await pool.query(
-        `SELECT id, canonical_name FROM characters WHERE novel_id = $1 AND ${pgCharMatchSql} LIMIT 1`,
+        isNarratorChar
+          ? `SELECT id, canonical_name, is_narrator FROM characters WHERE novel_id = $1 AND (is_narrator = true OR ${pgCharMatchSql}) LIMIT 1`
+          : `SELECT id, canonical_name, is_narrator FROM characters WHERE novel_id = $1 AND ${pgCharMatchSql} LIMIT 1`,
         [targetNovelId, character_id]
       );
       if (charRow.rows.length > 0) {
         pgCharUuid = charRow.rows[0].id;
         canonicalName = charRow.rows[0].canonical_name;
+        isNarratorChar = isNarratorChar || Boolean(charRow.rows[0].is_narrator);
       }
     }
   } catch (_) {
@@ -365,9 +373,12 @@ router.post('/voices/assign', optionalAuth, async (req, res) => {
   clearVoiceCaches({
     chapterId: chapter_id,
     novelId: targetNovelId || novel_id,
-    characterId: character_id,
+    characterId: isNarratorChar ? 'narrator' : character_id,
     canonicalName,
   });
+  try {
+    require('./novels').invalidateNovelsCache?.();
+  } catch (_) {}
 
   // Update segments AND manifest.timeline in MongoDB
   const mongoScopeFilter = chapter_id
@@ -381,6 +392,10 @@ router.post('/voices/assign', optionalAuth, async (req, res) => {
       const { Chapter } = require('../models');
       const matchIdSet = new Set([String(character_id)]);
       if (pgCharUuid) matchIdSet.add(pgCharUuid);
+      if (isNarratorChar) {
+        matchIdSet.add('narrator');
+        matchIdSet.add('Narrator');
+      }
       if (canonicalName) {
         matchIdSet.add(canonicalName);
         const slug = canonicalName.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');

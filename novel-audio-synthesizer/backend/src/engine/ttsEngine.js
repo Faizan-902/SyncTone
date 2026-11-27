@@ -736,16 +736,27 @@ class TTSEngine {
   }
 
   async synthesizeWithEdge(text, voiceId, options = {}) {
-    try {
-      return await this.synthesizeWithEdgeWs(text, voiceId, options);
-    } catch (wsErr) {
+    let lastErr = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        return await this.synthesizeWithEdgeNode(text, voiceId, options);
-      } catch (nodeErr) {
-        console.warn(`[TTSEngine] Edge WebSocket/Node failed (${wsErr.message} / ${nodeErr.message}). Trying Edge CLI fallback.`);
-        return await this.synthesizeWithEdgeCli(text, voiceId, options);
+        return await this.synthesizeWithEdgeWs(text, voiceId, options);
+      } catch (wsErr) {
+        lastErr = wsErr;
+        try {
+          return await this.synthesizeWithEdgeNode(text, voiceId, options);
+        } catch (nodeErr) {
+          lastErr = nodeErr;
+          const isRateLimit = /429|503|timeout/i.test(`${wsErr.message} ${nodeErr.message}`);
+          if (attempt === 0 && isRateLimit) {
+            await new Promise((r) => setTimeout(r, 350 + Math.floor(Math.random() * 250)));
+            continue;
+          }
+          console.warn(`[TTSEngine] Edge WebSocket/Node failed (${wsErr.message} / ${nodeErr.message}). Trying Edge CLI fallback.`);
+          return await this.synthesizeWithEdgeCli(text, voiceId, options);
+        }
       }
     }
+    throw lastErr || new Error('Edge TTS failed');
   }
 
   // --- ENGINE 2: Kokoro-TTS (Local ONNX / Acoustic Neural Fallback) ---
@@ -815,7 +826,9 @@ class TTSEngine {
     }
 
     if (options.failHonestly) {
-      throw new Error(`Kokoro-TTS model weights not available or synthesis failed for voice '${voiceId}'`);
+      const err = new Error(`Kokoro-TTS model weights unavailable and cloud bridge failed for voice '${voiceId}'`);
+      err.status = 503;
+      throw err;
     }
 
     // In test mode or when local speech is disabled: clean silent PCM buffer
@@ -1067,7 +1080,9 @@ class TTSEngine {
 
     // Fallback when Paradee ONNX is unavailable: fail honestly if requested, else delegate to Machine TTS
     if (mixContext.failHonestly) {
-      throw new Error(`Paradee-TTS model weights not available or synthesis failed for voice '${voiceId}'`);
+      const err = new Error(`Paradee-TTS model weights unavailable or synthesis failed for voice '${voiceId}'`);
+      err.status = 503;
+      throw err;
     }
     const fallbackRes = await this.synthesizeWithMachine(trimmed, paradeeVoice, effectiveSpeed, {
       ...mixContext,
@@ -1150,7 +1165,15 @@ class TTSEngine {
       };
     }
 
-    const engineChoice = (preferredEngine || 'auto').toLowerCase();
+    const rawEngineChoice = String(preferredEngine || 'auto').trim().toLowerCase();
+    const ENGINE_ALIASES = {
+      'edge-tts': 'msedge-tts',
+      msedge: 'msedge-tts',
+      kokoro: 'kokoro-tts',
+      paradee: 'paradee-tts',
+      machine: 'machine-tts',
+    };
+    const engineChoice = ENGINE_ALIASES[rawEngineChoice] || rawEngineChoice;
     const KNOWN_ENGINES = new Set(['msedge-tts', 'kokoro-tts', 'paradee-tts', 'paradee-mixed', 'machine-tts', 'auto']);
     if (!KNOWN_ENGINES.has(engineChoice)) {
       throw new Error(`Unsupported TTS engine '${preferredEngine}'`);
@@ -1209,7 +1232,7 @@ class TTSEngine {
     let useCatalogVoice = false;
     if (isNarrator) {
       catalogEntry = VOICE_CATALOG.narrator;
-      useCatalogVoice = !mixContext.explicitVoice || !rawVoiceId;
+      useCatalogVoice = !mixContext.explicitVoice && (!rawVoiceId || rawVoiceId === 'narrator' || requestedEdgeVoice === narratorDefaultEdge);
     } else if (charCatalogEntry) {
       const catEdge = LEGACY_VOICE_ALIASES[charCatalogEntry.primary] || charCatalogEntry.primary;
       const catFallback = charCatalogEntry.fallback
@@ -1305,6 +1328,12 @@ class TTSEngine {
       const speedPct = Math.round((safeSpeed - 1.0) * 100);
       const totalRate = Math.max(-45, Math.min(60, baseRatePct + speedPct));
       prosody.rate = `${totalRate >= 0 ? '+' : ''}${totalRate}%`;
+    }
+    const rawPitchSt = Number(mixContext.pitchOffsetSt);
+    if (Number.isFinite(rawPitchSt) && rawPitchSt !== 0) {
+      const clampedPitchSt = Math.max(-6, Math.min(6, rawPitchSt));
+      const totalPitchHz = Math.max(-25, Math.min(25, basePitchNum + Math.round(clampedPitchSt * 3)));
+      prosody.pitch = `${totalPitchHz >= 0 ? '+' : ''}${totalPitchHz}Hz`;
     }
 
     try {

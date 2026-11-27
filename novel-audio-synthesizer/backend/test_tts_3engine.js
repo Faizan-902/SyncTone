@@ -42,11 +42,11 @@ async function runTests() {
     'kokoro-tts'
   );
   assert.strictEqual(kokoroRes.engine, 'kokoro-tts');
-  assert.strictEqual(kokoroRes.format, 'pcm');
+  assert.ok(['pcm', 'mp3'].includes(kokoroRes.format), `Expected pcm or mp3, got ${kokoroRes.format}`);
   assert.ok(kokoroRes.audio_buffer instanceof Buffer);
   assert.ok(kokoroRes.audio_buffer.length > 0);
   assert.ok(kokoroRes.duration_ms > 0);
-  console.log(`  ✔ Engine 2 (kokoro-tts) generated ${kokoroRes.audio_buffer.length} bytes PCM (${kokoroRes.duration_ms}ms)`);
+  console.log(`  ✔ Engine 2 (kokoro-tts) generated ${kokoroRes.audio_buffer.length} bytes ${kokoroRes.format.toUpperCase()} (${kokoroRes.duration_ms}ms)`);
 
   // Test 4: Engine 3: machine-tts
   console.log('▶ [Test 4] Testing Engine 3: machine-tts (Machine Local OS Speech)...');
