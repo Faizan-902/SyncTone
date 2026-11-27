@@ -1,10 +1,12 @@
+const fs = require('fs');
+const path = require('path');
 const { Pool } = require('pg');
 const mongoose = require('mongoose');
 const { config } = require('../config');
 const { ensureVoiceCatalog, ensureChapterAudio } = require('./seedDemos');
 const { NOVELS } = require('./seed15RealNovels');
 
-async function seedAllProse({ closeConnections = false } = {}) {
+async function seedAllProse({ closeConnections = false, maxSynthesizeCount = 100 } = {}) {
   const pool = new Pool({
     connectionString: config.databaseUrl,
     ...(config.pgSsl ? { ssl: { rejectUnauthorized: Boolean(config.pgSslRejectUnauthorized) } } : {}),
@@ -135,18 +137,36 @@ async function seedAllProse({ closeConnections = false } = {}) {
 
   for (const ch of chRes.rows) {
     const existing = await ChapterCol.findOne({ pg_chapter_id: ch.id });
+    const mp3OnDisk = path.join(config.paths.outputDir, `${ch.id}.mp3`);
+    const wavOnDisk = path.join(config.paths.outputDir, `${ch.id}.wav`);
+    const hasRealDiskAudio =
+      (fs.existsSync(mp3OnDisk) && fs.statSync(mp3OnDisk).size > 45000) ||
+      (fs.existsSync(wavOnDisk) && fs.statSync(wavOnDisk).size > 45000);
+
     if (existing && Array.isArray(existing.segments) && existing.segments.length > 0) {
-      if (!ch.swift_audio_object) {
-        const stitched = await ensureChapterAudio(ch.id, existing.segments, { maxSynthesizeCount: 0 });
+      if (!ch.swift_audio_object || !hasRealDiskAudio) {
+        const stitched = await ensureChapterAudio(ch.id, existing.segments, { maxSynthesizeCount });
         const totalDuration = stitched?.total_duration_ms || existing.total_duration_ms || existing.segments[existing.segments.length - 1].end_ms || 0;
         const audioFormat = stitched?.audio_format || 'mp3';
+        if (stitched?.timeline && stitched.timeline.length > 0) {
+          await ChapterCol.updateOne(
+            { pg_chapter_id: ch.id },
+            {
+              $set: {
+                'manifest.total_duration_ms': totalDuration,
+                'manifest.audio_url': `/api/stream/${ch.id}`,
+                'manifest.timeline': stitched.timeline,
+              },
+            }
+          );
+        }
         await pool.query(
           'UPDATE chapters SET total_duration_ms = $1, status = $2, swift_audio_object = $3 WHERE id = $4',
           [totalDuration, 'completed', `${ch.id}.${audioFormat}`, ch.id]
         );
-        console.log(`✔ Ensured audio object for Chapter ${ch.id} (${ch.novel_title} - ${ch.title}): ${ch.id}.${audioFormat}`);
+        console.log(`✔ Synthesized real studio audio for Chapter ${ch.id} (${ch.novel_title} - ${ch.title}): ${ch.id}.${audioFormat} (${totalDuration}ms)`);
       } else {
-        console.log(`✔ Chapter ${ch.id} (${ch.novel_title} - ${ch.title}) already has ${existing.segments.length} segments.`);
+        console.log(`✔ Chapter ${ch.id} (${ch.novel_title} - ${ch.title}) already has ${existing.segments.length} segments & audio.`);
       }
       continue;
     }
@@ -190,7 +210,7 @@ async function seedAllProse({ closeConnections = false } = {}) {
         };
       });
 
-      const stitched = await ensureChapterAudio(ch.id, segs, { maxSynthesizeCount: 0 });
+      const stitched = await ensureChapterAudio(ch.id, segs, { maxSynthesizeCount });
       const totalDuration = stitched?.total_duration_ms || segs[segs.length - 1].end_ms;
       const audioFormat = stitched?.audio_format || 'mp3';
       const rawText = segs.map((s) => s.text).join('\n\n');

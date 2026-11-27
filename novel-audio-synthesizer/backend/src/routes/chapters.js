@@ -1384,11 +1384,31 @@ router.post('/synthesize/:chapter_id', optionalAuth, async (req, res) => {
           ? buildMixedCastPlan(chapterDoc.segments, novelCharacters)
           : null;
 
+      const charVoiceLookup = new Map();
+      for (const c of novelCharacters) {
+        if (!c?.voice_id) continue;
+        const candidates = [c.id, c.canonical_name, c.name];
+        if (c.is_narrator) candidates.push('narrator');
+        for (const k of candidates) {
+          if (k) charVoiceLookup.set(String(k).trim().toLowerCase(), c.voice_id);
+        }
+      }
+
       const enginesUsedSet = new Set();
 
       for (let i = 0; i < total; i++) {
         const seg = chapterDoc.segments[i];
-        const effectiveVoiceId = activeAssignments[seg.character_id] || seg.voice_id;
+        const segCharKey = String(seg.character_id || seg.speaker_id || '').trim().toLowerCase();
+        const segSpeakerKey = String(seg.speaker_name || '').trim().toLowerCase();
+        const isNarrSeg = seg.type === 'narration' || segCharKey === 'narrator';
+        const effectiveVoiceId =
+          charVoiceLookup.get(segCharKey) ||
+          charVoiceLookup.get(segSpeakerKey) ||
+          (isNarrSeg ? charVoiceLookup.get('narrator') : null) ||
+          activeAssignments[seg.character_id] ||
+          activeAssignments[segCharKey] ||
+          seg.assigned_voice_id ||
+          seg.voice_id;
         const isImageSeg = seg.type === 'image' || (seg.text && seg.text.startsWith('[IMAGE:'));
 
         broadcastProgress(chapter_id, {
@@ -1423,7 +1443,8 @@ router.post('/synthesize/:chapter_id', optionalAuth, async (req, res) => {
               {
                 characterId: seg.character_id || seg.speaker_id || '',
                 speakerName: seg.speaker_name || '',
-                isNarrator: seg.type === 'narration' || String(seg.character_id || '').toLowerCase() === 'narrator',
+                isNarrator: isNarrSeg,
+                explicitVoice: Boolean(effectiveVoiceId && effectiveVoiceId !== 'en-GB-RyanNeural'),
                 castPlan,
               }
             );

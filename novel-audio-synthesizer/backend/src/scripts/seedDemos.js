@@ -123,8 +123,11 @@ async function ensureChapterAudio(chapterId, segments, { maxSynthesizeCount = 0 
   const mp3Path = path.join(outputDir, `${chapterId}.mp3`);
   const wavPath = path.join(outputDir, `${chapterId}.wav`);
 
-  if ((fs.existsSync(mp3Path) && fs.statSync(mp3Path).size > 0) ||
-      (fs.existsSync(wavPath) && fs.statSync(wavPath).size > 0)) {
+  if (
+    maxSynthesizeCount === 0 &&
+    ((fs.existsSync(mp3Path) && fs.statSync(mp3Path).size > 0) ||
+      (fs.existsSync(wavPath) && fs.statSync(wavPath).size > 0))
+  ) {
     const isWav = fs.existsSync(wavPath) && (!fs.existsSync(mp3Path) || fs.statSync(wavPath).mtimeMs > fs.statSync(mp3Path).mtimeMs);
     const format = isWav ? 'wav' : 'mp3';
     const shouldUploadCloud =
@@ -158,6 +161,31 @@ async function ensureChapterAudio(chapterId, segments, { maxSynthesizeCount = 0 
     };
   }
 
+  if (
+    maxSynthesizeCount > 0 &&
+    ((fs.existsSync(mp3Path) && fs.statSync(mp3Path).size > 45000) ||
+      (fs.existsSync(wavPath) && fs.statSync(wavPath).size > 45000))
+  ) {
+    const isWav = fs.existsSync(wavPath) && (!fs.existsSync(mp3Path) || fs.statSync(wavPath).mtimeMs > fs.statSync(mp3Path).mtimeMs);
+    const format = isWav ? 'wav' : 'mp3';
+    return {
+      chapter_id: chapterId,
+      audio_stream_url: `/api/stream/${chapterId}`,
+      audio_url: `/api/stream/${chapterId}`,
+      audio_format: format,
+      total_duration_ms: segments.length ? segments[segments.length - 1].end_ms : 0,
+      timeline: segments.map((s) => ({
+        order: s.order,
+        segment_id: s.segment_id,
+        start_ms: s.start_ms,
+        end_ms: s.end_ms,
+        character_id: s.character_id,
+        voice_id: s.voice_id,
+        text: s.text,
+      })),
+    };
+  }
+
   console.log(`  [Audio] Generating playback demo audio for chapter ${chapterId} (maxSynth: ${maxSynthesizeCount})...`);
   const segmentAudios = new Array(segments.length);
   let synthFormat = 'mp3';
@@ -169,7 +197,12 @@ async function ensureChapterAudio(chapterId, segments, { maxSynthesizeCount = 0 
     const durationMs = (seg.end_ms && seg.start_ms) ? (seg.end_ms - seg.start_ms) : (seg.duration_ms || 2500);
 
     try {
-      const result = await ttsEngine.synthesizeSegment(seg.text, seg.voice_id);
+      const result = await ttsEngine.synthesizeSegment(seg.text, seg.voice_id, 1.0, 'auto', {
+        characterId: seg.character_id || seg.speaker_id || '',
+        speakerName: seg.speaker_name || '',
+        isNarrator: seg.type === 'narration' || String(seg.character_id || '').toLowerCase() === 'narrator',
+        explicitVoice: Boolean(seg.voice_id && seg.voice_id !== 'en-GB-RyanNeural'),
+      });
       if (result && result.audio_buffer && result.audio_buffer.length > 0) {
         synthFormat = result.format || 'mp3';
         const dur = result.duration_ms || durationMs;
