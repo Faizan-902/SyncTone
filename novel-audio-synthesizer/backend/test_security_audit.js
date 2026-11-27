@@ -13,6 +13,9 @@ const { createApp } = require('./src/app');
 const { pool, connectPostgres, connectMongo } = require('./src/db');
 const { Chapter } = require('./src/models');
 const chaptersRouter = require('./src/routes/chapters');
+const { config } = require('./src/config');
+const fs = require('fs');
+const path = require('path');
 
 async function createUserDirect(username, email, role) {
   const res = await pool.query(
@@ -44,6 +47,7 @@ async function runTests() {
   const ts = `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   const createdUsers = [];
   let novelAId = null;
+  let novelBId = null;
 
   try {
     console.log('\n▶ [Issue 1] Testing Chapter Ingestion Auth, Spoof Removal & Ownership...');
@@ -182,7 +186,199 @@ async function runTests() {
     );
 
     console.log('  ✔ Issue 1 security & ownership checks passed!');
+
+    // =========================================================================
+    // [Issue 2] Broken Authorization: /voices/assign, /novels/:id, & mutations
+    // =========================================================================
+    console.log('\n▶ [Issue 2] Testing Voice Assignment, Novel Patch/Create, Parse/Synth & Playback Auth...');
+
+    const chapterAId = ownerRes.data.chapter_id;
+    novelBId = uuidv4();
+    await pool.query(
+      `INSERT INTO novels (id, title, synopsis, channel, added_by, status)
+       VALUES ($1, $2, 'Writer B novel', 'community', $3, 'draft')`,
+      [novelBId, `Writer B Novel ${ts}`, writerB.id]
+    );
+    // Create character owned by writerA on novelA and character owned by writerB on novelB
+    const charARes = await pool.query(
+      `INSERT INTO characters (novel_id, canonical_name, gender, voice_id, is_narrator, source)
+       VALUES ($1, 'Hero A', 'male', 'en-GB-RyanNeural', false, 'manual')
+       RETURNING id`,
+      [novelAId]
+    );
+    const charAId = charARes.rows[0].id;
+    const charBRes = await pool.query(
+      `INSERT INTO characters (novel_id, canonical_name, gender, voice_id, is_narrator, source)
+       VALUES ($1, 'Hero B', 'male', 'en-GB-ThomasNeural', true, 'manual')
+       RETURNING id`,
+      [novelBId]
+    );
+    const charBId = charBRes.rows[0].id;
+
+    // 2.1 POST /api/voices/assign: unauthenticated -> 401
+    const vaUnauth = await axios.post(
+      `${baseUrl}/voices/assign`,
+      { character_id: charAId, new_voice_id: 'en-US-GuyNeural', chapter_id: chapterAId },
+      { validateStatus: () => true }
+    );
+    assert.strictEqual(vaUnauth.status, 401, `Unauthenticated /voices/assign must return 401, got ${vaUnauth.status}`);
+
+    // 2.2 POST /api/voices/assign: reader -> 403
+    const vaReader = await axios.post(
+      `${baseUrl}/voices/assign`,
+      { character_id: charAId, new_voice_id: 'en-US-GuyNeural', chapter_id: chapterAId },
+      { headers: { Cookie: cookieReader }, validateStatus: () => true }
+    );
+    assert.strictEqual(vaReader.status, 403, `Reader /voices/assign must return 403, got ${vaReader.status}`);
+
+    // 2.3 POST /api/voices/assign: writerB modifying writerA's chapter/character -> 403
+    const vaCrossWriter = await axios.post(
+      `${baseUrl}/voices/assign`,
+      { character_id: charAId, new_voice_id: 'en-US-GuyNeural', chapter_id: chapterAId },
+      { headers: { Cookie: cookieB }, validateStatus: () => true }
+    );
+    assert.strictEqual(vaCrossWriter.status, 403, `Cross-writer /voices/assign must return 403, got ${vaCrossWriter.status}`);
+
+    // 2.4 POST /api/voices/assign: character belongs to novelA, writerB passes novelB_id trying cross-novel hijack -> 403/400
+    const vaCrossCharMismatch = await axios.post(
+      `${baseUrl}/voices/assign`,
+      { character_id: charAId, new_voice_id: 'en-US-GuyNeural', novel_id: novelBId },
+      { headers: { Cookie: cookieB }, validateStatus: () => true }
+    );
+    assert.ok(
+      vaCrossCharMismatch.status === 403 || vaCrossCharMismatch.status === 400,
+      `Cross-novel character mismatch must be rejected (403/400), got ${vaCrossCharMismatch.status}`
+    );
+    const charACheckAfterFail = await pool.query('SELECT voice_id FROM characters WHERE id = $1', [charAId]);
+    assert.strictEqual(charACheckAfterFail.rows[0].voice_id, 'en-GB-RyanNeural', 'Unauthorized voice assign mutated PG!');
+
+    // 2.5 POST /api/voices/assign: legitimate owner writerA succeeds -> 200
+    const vaOwner = await axios.post(
+      `${baseUrl}/voices/assign`,
+      { character_id: charAId, new_voice_id: 'en-US-GuyNeural', chapter_id: chapterAId },
+      { headers: { Cookie: cookieA }, validateStatus: () => true }
+    );
+    assert.strictEqual(vaOwner.status, 200, `Owner /voices/assign must return 200, got ${vaOwner.status}`);
+
+    // 2.6 PATCH /api/novels/:id: unauthenticated -> 401; writerB on novelA -> 403
+    const patchUnauth = await axios.patch(
+      `${baseUrl}/novels/${novelAId}`,
+      { title: 'Hacked Title' },
+      { validateStatus: () => true }
+    );
+    assert.strictEqual(patchUnauth.status, 401);
+
+    const patchCrossWriter = await axios.patch(
+      `${baseUrl}/novels/${novelAId}`,
+      { title: 'Cross Writer Edit', added_by: writerB.id },
+      { headers: { Cookie: cookieB }, validateStatus: () => true }
+    );
+    assert.strictEqual(patchCrossWriter.status, 403);
+
+    // 2.7 PATCH /api/novels/:id: writerA CANNOT promote own novel to 'verified' -> 403
+    const patchWriterVerify = await axios.patch(
+      `${baseUrl}/novels/${novelAId}`,
+      { channel: 'verified' },
+      { headers: { Cookie: cookieA }, validateStatus: () => true }
+    );
+    assert.strictEqual(
+      patchWriterVerify.status,
+      403,
+      `Writer self-promotion to verified channel must return 403, got ${patchWriterVerify.status}`
+    );
+
+    // 2.8 PATCH /api/novels/:id: writerA updating title/synopsis succeeds -> 200, added_by cannot be forged
+    const patchOwnerOk = await axios.patch(
+      `${baseUrl}/novels/${novelAId}`,
+      { title: `Owner Updated Novel ${ts}`, added_by: writerB.id },
+      { headers: { Cookie: cookieA }, validateStatus: () => true }
+    );
+    assert.strictEqual(patchOwnerOk.status, 200, `Owner PATCH must succeed, got ${patchOwnerOk.status}`);
+    assert.strictEqual(patchOwnerOk.data.novel.added_by, writerA.id, 'added_by cannot be overridden by request body');
+
+    // 2.9 PATCH /api/novels/:id: admin CAN promote novel to 'verified' -> 200
+    const patchAdminVerify = await axios.patch(
+      `${baseUrl}/novels/${novelAId}`,
+      { channel: 'verified' },
+      { headers: { Cookie: cookieAdmin }, validateStatus: () => true }
+    );
+    assert.strictEqual(patchAdminVerify.status, 200);
+    assert.strictEqual(patchAdminVerify.data.novel.channel, 'verified');
+
+    // 2.10 Audited related mutation routes:
+    // POST /api/novels unauthenticated added_by spoof -> 401
+    const postNovelSpoof = await axios.post(
+      `${baseUrl}/novels`,
+      { title: 'Spoof Novel', channel: 'verified', added_by: writerA.id },
+      { validateStatus: () => true }
+    );
+    assert.strictEqual(postNovelSpoof.status, 401, `Unauth POST /novels must return 401, got ${postNovelSpoof.status}`);
+
+    // POST /api/novels writer cannot force channel='verified' -> 403
+    const postNovelWriterVerified = await axios.post(
+      `${baseUrl}/novels`,
+      { title: 'Writer Verified Bypass', channel: 'verified' },
+      { headers: { Cookie: cookieA }, validateStatus: () => true }
+    );
+    assert.strictEqual(
+      postNovelWriterVerified.status,
+      403,
+      `Writer POST /novels channel='verified' must return 403, got ${postNovelWriterVerified.status}`
+    );
+
+    // POST /api/parse/:id & POST /api/synthesize/:id enforce auth + ownership
+    const parseUnauth = await axios.post(`${baseUrl}/parse/${chapterAId}`, {}, { validateStatus: () => true });
+    assert.strictEqual(parseUnauth.status, 401, `Unauth /parse must return 401, got ${parseUnauth.status}`);
+    const parseCross = await axios.post(
+      `${baseUrl}/parse/${chapterAId}`,
+      {},
+      { headers: { Cookie: cookieB }, validateStatus: () => true }
+    );
+    assert.strictEqual(parseCross.status, 403, `Cross-writer /parse must return 403, got ${parseCross.status}`);
+
+    const synthUnauth = await axios.post(
+      `${baseUrl}/synthesize/${chapterAId}`,
+      { engine: 'machine-tts' },
+      { validateStatus: () => true }
+    );
+    assert.strictEqual(synthUnauth.status, 401, `Unauth /synthesize must return 401, got ${synthUnauth.status}`);
+    const synthCross = await axios.post(
+      `${baseUrl}/synthesize/${chapterAId}`,
+      { engine: 'machine-tts' },
+      { headers: { Cookie: cookieB }, validateStatus: () => true }
+    );
+    assert.strictEqual(synthCross.status, 403, `Cross-writer /synthesize must return 403, got ${synthCross.status}`);
+
+    // POST/GET /api/playback/progress require auth and prevent cross-user IDOR
+    const pbUnauth = await axios.post(
+      `${baseUrl}/playback/progress`,
+      { user_id: writerA.id, novel_id: novelAId, chapter_id: chapterAId, segment_order: 1, position_ms: 1000 },
+      { validateStatus: () => true }
+    );
+    assert.strictEqual(pbUnauth.status, 401, `Unauth /playback/progress must return 401, got ${pbUnauth.status}`);
+
+    const pbCross = await axios.post(
+      `${baseUrl}/playback/progress`,
+      { user_id: writerA.id, novel_id: novelAId, chapter_id: chapterAId, segment_order: 1, position_ms: 1000 },
+      { headers: { Cookie: cookieB }, validateStatus: () => true }
+    );
+    assert.strictEqual(pbCross.status, 403, `Cross-user POST /playback/progress must return 403, got ${pbCross.status}`);
+
+    // POST /api/novels/upload-asset requires writer/admin auth
+    const assetUnauth = await axios.post(
+      `${baseUrl}/novels/upload-asset`,
+      { data_url: 'data:image/png;base64,iVBORw0KGgo=' },
+      { validateStatus: () => true }
+    );
+    assert.strictEqual(assetUnauth.status, 401, `Unauth /upload-asset must return 401, got ${assetUnauth.status}`);
+
+    await pool.query('DELETE FROM novels WHERE id = $1', [novelBId]).catch(() => {});
+    console.log('  ✔ Issue 2 authorization & ownership checks passed!');
   } finally {
+    if (novelBId) {
+      await Chapter.deleteMany({ novel_id: novelBId }).catch(() => {});
+      await pool.query('DELETE FROM novels WHERE id = $1', [novelBId]).catch(() => {});
+    }
     if (novelAId) {
       await Chapter.deleteMany({ novel_id: novelAId }).catch(() => {});
       await pool.query('DELETE FROM novels WHERE id = $1', [novelAId]).catch(() => {});

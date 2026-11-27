@@ -15,7 +15,7 @@ const { eventDispatcher } = require('../engine/eventDispatcher');
 const { validateAudioBuffer } = require('../engine/audioValidator');
 const { broadcastProgress } = require('../websocket');
 const { config } = require('../config');
-const { authenticateUser, optionalAuth, requireRole } = require('../middleware/auth');
+const { authenticateUser, requireRole } = require('../middleware/auth');
 const { getSwiftAuth } = require('./swift');
 const { storageService, parseByteRange, pipeStreamSafe } = require('../services/storageService');
 const statusRouter = require('./status');
@@ -1121,15 +1121,26 @@ const synthesisInFlight = new Map();
  * 4. POST /api/parse/:chapter_id
  * Reads chapter text from MongoDB, runs parsing & attribution, updates MongoDB & PostgreSQL.
  */
-router.post('/parse/:chapter_id', optionalAuth, async (req, res) => {
+router.post('/parse/:chapter_id', authenticateUser, requireRole('writer', 'admin'), async (req, res) => {
   const { chapter_id } = req.params;
 
   if (!chapter_id || !UUID_REGEX.test(chapter_id)) {
     return res.status(400).json({ error: 'Invalid chapter UUID format.' });
   }
 
-  if (req.user && req.user.role === 'reader') {
-    return res.status(403).json({ error: "Forbidden: role 'reader' cannot parse chapters." });
+  try {
+    const ownerCheck = await pool.query(
+      'SELECT c.id, c.novel_id, n.added_by FROM chapters c LEFT JOIN novels n ON n.id = c.novel_id WHERE c.id = $1',
+      [chapter_id]
+    );
+    if (ownerCheck.rows.length === 0) {
+      return res.status(404).json({ detail: 'Chapter not found.' });
+    }
+    if (req.user.role !== 'admin' && ownerCheck.rows[0].added_by !== req.user.id) {
+      return res.status(403).json({ error: 'Forbidden: you do not have permission to parse this chapter.' });
+    }
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to verify chapter ownership.' });
   }
 
   if (parsingInFlight.has(chapter_id)) {
@@ -1335,11 +1346,26 @@ router.post('/parse/:chapter_id', optionalAuth, async (req, res) => {
  * 5. POST /api/synthesize/:chapter_id
  * Synthesizes segment audio via Edge TTS (Kokoro fallback), stitches PCM/MP3, updates MongoDB manifest & PostgreSQL chapters/jobs.
  */
-router.post('/synthesize/:chapter_id', optionalAuth, async (req, res) => {
+router.post('/synthesize/:chapter_id', authenticateUser, requireRole('writer', 'admin'), async (req, res) => {
   const { chapter_id } = req.params;
 
   if (!chapter_id || !UUID_REGEX.test(chapter_id)) {
     return res.status(400).json({ error: 'Invalid chapter UUID format.' });
+  }
+
+  try {
+    const ownerCheck = await pool.query(
+      'SELECT c.id, c.novel_id, n.added_by FROM chapters c LEFT JOIN novels n ON n.id = c.novel_id WHERE c.id = $1',
+      [chapter_id]
+    );
+    if (ownerCheck.rows.length === 0) {
+      return res.status(404).json({ detail: 'Chapter not found.' });
+    }
+    if (req.user.role !== 'admin' && ownerCheck.rows[0].added_by !== req.user.id) {
+      return res.status(403).json({ error: 'Forbidden: you do not have permission to synthesize this chapter.' });
+    }
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to verify chapter ownership.' });
   }
 
   const preferredEngine = String(req.body?.engine || req.query?.engine || 'auto').trim() || 'auto';

@@ -264,7 +264,7 @@ async function runTests() {
     {
       title: 'A Study in Scarlet',
       synopsis: 'The landmark debut of Sherlock Holmes and Dr. John Watson.',
-      channel: 'verified',
+      channel: 'community',
       added_by: writerUser.id,
     },
     { headers: { Cookie: writerTokenCookie } }
@@ -296,13 +296,13 @@ async function runTests() {
   );
 
   // 4.4 GET /api/novels (channel filter & narrator join)
-  const listNovelsRes = await axios.get(`${BASE_URL}/novels?channel=verified`);
+  const listNovelsRes = await axios.get(`${BASE_URL}/novels?channel=community`);
   const foundNovel = listNovelsRes.data.novels.find((n) => n.id === createdNovel.id);
   if (!foundNovel) throw new Error('Created novel not in list');
   if (foundNovel.narrator_name !== 'Dr. John Watson' || foundNovel.narrator_voice_id !== 'am_adam') {
     throw new Error('Narrator join failed');
   }
-  console.log(`  ✔ GET /api/novels verified channel filtering and narrator join (${foundNovel.narrator_name})`);
+  console.log(`  ✔ GET /api/novels community channel filtering and narrator join (${foundNovel.narrator_name})`);
 
   // 4.5 GET /api/novels/:id details & unknown ID check
   const novelDetailRes = await axios.get(`${BASE_URL}/novels/${createdNovel.id}`);
@@ -343,9 +343,17 @@ async function runTests() {
   const mongoBefore = await Chapter.findOne({ pg_chapter_id: tempChapterId });
   if (!mongoBefore) throw new Error('Expected temp chapter in MongoDB before deletion');
 
-  // Attempt DELETE - must be rejected with 403 Forbidden
+  // Attempt DELETE unauthenticated -> 401; authenticated writer -> 403 Forbidden
   try {
     await axios.delete(`${BASE_URL}/novels/${tempNovelId}`);
+    throw new Error('Expected unauthenticated DELETE /api/novels/:id to fail');
+  } catch (delUnauthErr) {
+    if (delUnauthErr.response?.status !== 401) {
+      throw new Error(`Expected 401 Unauthorized, got ${delUnauthErr.response?.status}`);
+    }
+  }
+  try {
+    await axios.delete(`${BASE_URL}/novels/${tempNovelId}`, { headers: { Cookie: writerTokenCookie } });
     throw new Error('Expected DELETE /api/novels/:id to be rejected with 403 Forbidden');
   } catch (delErr) {
     if (delErr.response?.status !== 403) {
@@ -552,22 +560,30 @@ async function runTests() {
   console.log(`  ✔ GET /api/manifest/:id verified Rule 3 (mapped audio_stream_url: ${manifestRes.data.audio_stream_url})`);
 
   // 5.6 Playback history atomic upsert & idempotence
-  const p1 = await axios.post(`${BASE_URL}/playback/progress`, {
-    user_id: writerUser.id,
-    novel_id: createdNovel.id,
-    chapter_id: ingestedChapterId,
-    segment_order: 1,
-    position_ms: 3000,
-  });
+  const p1 = await axios.post(
+    `${BASE_URL}/playback/progress`,
+    {
+      user_id: writerUser.id,
+      novel_id: createdNovel.id,
+      chapter_id: ingestedChapterId,
+      segment_order: 1,
+      position_ms: 3000,
+    },
+    { headers: { Cookie: writerTokenCookie } }
+  );
   if (p1.status !== 200) throw new Error('Playback progress post failed');
 
-  const p2 = await axios.post(`${BASE_URL}/playback/progress`, {
-    user_id: writerUser.id,
-    novel_id: createdNovel.id,
-    chapter_id: ingestedChapterId,
-    segment_order: 2,
-    position_ms: 6500,
-  });
+  const p2 = await axios.post(
+    `${BASE_URL}/playback/progress`,
+    {
+      user_id: writerUser.id,
+      novel_id: createdNovel.id,
+      chapter_id: ingestedChapterId,
+      segment_order: 2,
+      position_ms: 6500,
+    },
+    { headers: { Cookie: writerTokenCookie } }
+  );
   const histCheck = await pool.query(
     `SELECT h.id, h.user_id, h.novel_id, p.chapter_id, p.position_ms
      FROM playback_history h
@@ -606,33 +622,41 @@ async function runTests() {
   const prevRegistryRaw = hadRegistry ? fs.readFileSync(registryPath, 'utf-8') : null;
 
   try {
-    // 7.2 Anonymous access to POST /api/voices/assign succeeds via optionalAuth (Bug #6)
-    const assignAnonRes = await axios.post(`${BASE_URL}/voices/assign`, {
-      character_id: 'sprint1_anon_speaker',
-      new_voice_id: 'am_adam',
-      chapter_id: ingestedChapterId,
-    });
-    if (assignAnonRes.status !== 200 || !assignAnonRes.data?.ok) {
-      throw new Error(`Expected 200 { ok: true } for anonymous voice assignment (optionalAuth), got ${assignAnonRes.status}`);
-    }
-    console.log('  ✔ optionalAuth Check: Anonymous voice assignment succeeded with 200 OK');
-
-    // 7.3 Reader access to POST /api/voices/assign succeeds via optionalAuth (Bug #6)
-    const assignReaderRes = await axios.post(
-      `${BASE_URL}/voices/assign`,
-      {
-        character_id: 'sprint1_reader_speaker',
-        new_voice_id: 'bm_lewis',
+    // 7.2 Anonymous access to POST /api/voices/assign must be rejected with 401
+    try {
+      await axios.post(`${BASE_URL}/voices/assign`, {
+        character_id: 'sprint1_anon_speaker',
+        new_voice_id: 'am_adam',
         chapter_id: ingestedChapterId,
-      },
-      { headers: { Cookie: readerTokenCookie } }
-    );
-    if (assignReaderRes.status !== 200 || !assignReaderRes.data?.ok) {
-      throw new Error(`Expected 200 { ok: true } for reader voice assignment (optionalAuth), got ${assignReaderRes.status}`);
+      });
+      throw new Error('Expected anonymous voice assignment to fail');
+    } catch (err) {
+      if (err.response?.status !== 401) {
+        throw new Error(`Expected 401 Unauthorized for anonymous voice assignment, got ${err.response?.status}`);
+      }
+      console.log('  ✔ Auth Check: Anonymous voice assignment rejected with 401 Unauthorized');
     }
-    console.log('  ✔ optionalAuth Check: Reader voice assignment succeeded with 200 OK');
 
-    // 7.4 Writer access to POST /api/voices/assign succeeds with 200
+    // 7.3 Reader access to POST /api/voices/assign must be rejected with 403
+    try {
+      await axios.post(
+        `${BASE_URL}/voices/assign`,
+        {
+          character_id: 'sprint1_reader_speaker',
+          new_voice_id: 'bm_lewis',
+          chapter_id: ingestedChapterId,
+        },
+        { headers: { Cookie: readerTokenCookie } }
+      );
+      throw new Error('Expected reader voice assignment to fail');
+    } catch (err) {
+      if (err.response?.status !== 403) {
+        throw new Error(`Expected 403 Forbidden for reader voice assignment, got ${err.response?.status}`);
+      }
+      console.log('  ✔ RBAC Check: Reader voice assignment rejected with 403 Forbidden');
+    }
+
+    // 7.4 Owner writer access to POST /api/voices/assign succeeds with 200
     const assignWriterRes = await axios.post(
       `${BASE_URL}/voices/assign`,
       {
@@ -645,7 +669,7 @@ async function runTests() {
     if (assignWriterRes.status !== 200) {
       throw new Error(`Expected 200 for writer voice assignment, got ${assignWriterRes.status}`);
     }
-    console.log('  ✔ RBAC Check: Writer voice assignment succeeded with 200 OK');
+    console.log('  ✔ RBAC Check: Owner writer voice assignment succeeded with 200 OK');
   } finally {
     if (hadRegistry && prevRegistryRaw !== null) {
       fs.writeFileSync(registryPath, prevRegistryRaw, 'utf-8');
