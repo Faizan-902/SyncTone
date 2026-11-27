@@ -26,7 +26,7 @@ export default function TopHeader({
   const { theme, cycleTheme } = useTheme();
 
   return (
-    <header className="sticky top-0 z-40 bg-[var(--bg-bar)] border-b border-[var(--border-subtle)] h-14 backdrop-blur-md bg-opacity-95">
+    <header className="top-app-header sticky top-0 z-40 bg-[var(--bg-bar)] border-b border-[var(--border-subtle)] h-14 backdrop-blur-md bg-opacity-95">
       <div className="max-w-7xl mx-auto px-2 sm:px-8 h-full flex items-center justify-between gap-2 sm:gap-4">
         {/* Brand & Primary Navigation Links */}
         <div className="flex items-center gap-3 sm:gap-5 min-w-0 flex-1">

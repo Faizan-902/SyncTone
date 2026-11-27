@@ -68,6 +68,8 @@ export default function AudioPlayer({
   onChangeTtsEngine,
   isFollowingAlong: propIsFollowingAlong,
   onToggleFollowAlong,
+  onSetVolume,
+  isInReader = false,
   isBuffering: propIsBuffering,
   error: propError,
   speed: propSpeed,
@@ -240,32 +242,29 @@ export default function AudioPlayer({
   };
 
   const handleVolumeToggle = useCallback(() => {
-    if (!audioRef?.current) return;
-    if (isMuted || volume === 0) {
-      audioRef.current.muted = false;
-      setIsMuted(false);
-      const restored = volume === 0 ? 1.0 : volume;
-      setVolume(restored);
-      audioRef.current.volume = restored;
-    } else {
-      audioRef.current.muted = true;
-      setIsMuted(true);
+    const nextMuted = !(isMuted || volume === 0);
+    const nextVolume = !nextMuted && volume === 0 ? 1.0 : volume;
+    setIsMuted(nextMuted);
+    if (!nextMuted && volume === 0) {
+      setVolume(1.0);
     }
-  }, [audioRef, isMuted, volume]);
+    if (audioRef?.current) {
+      audioRef.current.muted = nextMuted;
+      audioRef.current.volume = nextVolume;
+    }
+    onSetVolume?.({ volume: nextVolume, muted: nextMuted });
+  }, [audioRef, isMuted, volume, onSetVolume]);
 
   const handleVolumeChange = (e) => {
     const val = parseFloat(e.target.value);
+    const nextMuted = val === 0;
     setVolume(val);
+    setIsMuted(nextMuted);
     if (audioRef?.current) {
       audioRef.current.volume = val;
-      if (val === 0) {
-        audioRef.current.muted = true;
-        setIsMuted(true);
-      } else {
-        audioRef.current.muted = false;
-        setIsMuted(false);
-      }
+      audioRef.current.muted = nextMuted;
     }
+    onSetVolume?.({ volume: val, muted: nextMuted });
   };
 
   // Global Keyboard Shortcuts (Space, J, L, M) with strict focus/input guards
@@ -408,7 +407,7 @@ export default function AudioPlayer({
       {/* Hidden audio element for audio sync engine */}
       <audio
         ref={audioRef}
-        src={playbackMode === 'tts' ? undefined : audioUrl}
+        src={audioUrl || undefined}
         preload="auto"
         onPlay={(e) => {
           setIsBufferingState(false);
@@ -475,9 +474,9 @@ export default function AudioPlayer({
       </div>
 
       {/* Main 3-zone container */}
-      <div className="w-full max-w-7xl mx-auto flex items-center justify-between gap-2 sm:gap-6">
+      <div className="w-full max-w-7xl mx-auto flex items-center justify-between gap-2 sm:gap-3 xl:gap-5">
         {/* Left: Track Information */}
-        <div className="audio-track-info flex items-center gap-2 sm:gap-3 min-w-0 max-w-[130px] xs:max-w-[170px] sm:max-w-[240px] md:max-w-xs shrink-0">
+        <div className="audio-track-info flex items-center gap-2 sm:gap-2.5 min-w-0 flex-1 max-w-[130px] xs:max-w-[165px] sm:max-w-[190px] xl:max-w-[240px]">
           {/* 40x40 on mobile, 48x48 on desktop Book Jacket Artwork */}
           <div className="audio-track-art w-10 h-10 sm:w-12 sm:h-12 bg-[var(--bg-card)] border border-[var(--border-subtle)] rounded-lg flex items-center justify-center font-mono text-[10px] text-[var(--text-sub)] shrink-0 overflow-hidden shadow-xs">
             {novelObj?.cover_object ? (
@@ -514,7 +513,7 @@ export default function AudioPlayer({
         </div>
 
         {/* Center: Playback Transport Buttons & Scrubber */}
-        <div className="audio-central-cluster hidden sm:flex shrink-0 w-[230px] lg:w-full lg:max-w-md xl:max-w-xl mx-auto flex-col justify-center gap-1 px-2">
+        <div className="audio-central-cluster hidden sm:flex flex-1 min-w-[200px] max-w-[330px] lg:max-w-[360px] xl:max-w-[420px] mx-auto flex-col justify-center gap-1 px-1">
           {/* Transport Buttons Row */}
           <div className="audio-control-buttons flex items-center justify-center gap-1.5 sm:gap-2">
             {/* Skip -10s */}
@@ -684,12 +683,12 @@ export default function AudioPlayer({
           )}
 
           {/* Animated Audio Waveform Visualizer (Section 8) */}
-          <div className="hidden lg:flex items-center px-2 py-1 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-surface)]">
+          <div className="hidden xl:flex items-center px-2 py-1 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-surface)] shrink-0">
             <AudioVisualizer
               isPlaying={isPlaying}
               isBuffering={isBuffering}
               audioElement={audioRef?.current || null}
-              barCount={14}
+              barCount={10}
               height={14}
             />
           </div>
@@ -698,7 +697,7 @@ export default function AudioPlayer({
           <button
             type="button"
             onClick={handleToggleFollowAlong}
-            className={`boxed-btn px-3 py-1 text-[11px] font-mono cursor-pointer hidden md:inline-flex items-center gap-1.5 rounded-full active:scale-95 transition-all ${
+            className={`boxed-btn px-2 sm:px-2.5 py-1 text-[10px] sm:text-[11px] font-mono cursor-pointer hidden md:inline-flex items-center gap-1.5 rounded-full active:scale-95 transition-all shrink-0 whitespace-nowrap ${
               followAlong && isPlaying
                 ? 'text-[var(--text-main)] border-[var(--border-strong)]'
                 : 'text-[var(--text-muted)] border-[var(--border-subtle)] hover:border-[var(--border-strong)]'
@@ -712,16 +711,17 @@ export default function AudioPlayer({
             ) : (
               <span className="dot text-[var(--text-muted)]" />
             )}
-            <span className="font-bold tracking-wider">FOLLOW ALONG</span>
+            <span className="font-bold tracking-wider hidden lg:inline">FOLLOW ALONG</span>
+            <span className="font-bold tracking-wider lg:hidden">FOLLOW</span>
           </button>
 
           {/* Multi-Engine Selector Dropdown */}
           {onChangeTtsEngine && (
-            <div className="relative hidden lg:flex items-center">
+            <div className="relative hidden md:flex items-center shrink-0">
               <select
                 value={ttsEngine}
                 onChange={(e) => onChangeTtsEngine(e.target.value)}
-                className="boxed-btn px-2.5 py-1 text-[11px] font-mono bg-[var(--bg-card)] text-[var(--text-main)] border border-[var(--border-strong)] cursor-pointer focus:outline-none rounded-xl shadow-xs transition-all"
+                className="boxed-btn px-2 py-1 text-[11px] font-mono bg-[var(--bg-card)] text-[var(--text-main)] border border-[var(--border-strong)] cursor-pointer focus:outline-none rounded-xl shadow-xs transition-all max-w-[138px] xl:max-w-[162px] truncate"
                 title={`TTS Engine: ${
                   ttsEngine === 'msedge-tts'
                     ? 'Microsoft Edge Cloud Neural TTS'
@@ -749,7 +749,7 @@ export default function AudioPlayer({
             <button
               type="button"
               onClick={() => onTogglePlaybackMode?.()}
-              className="boxed-btn px-2 sm:px-3 py-1 text-[10px] sm:text-[11px] font-mono cursor-pointer flex items-center gap-1 sm:gap-1.5 rounded-full active:scale-95 transition-all shrink-0"
+              className="boxed-btn px-2 sm:px-2.5 py-1 text-[10px] sm:text-[11px] font-mono cursor-pointer flex items-center gap-1 sm:gap-1.5 rounded-full active:scale-95 transition-all shrink-0 whitespace-nowrap"
               title={
                 playbackMode === 'tts'
                   ? 'Voice TTS: Playing live character TTS segment-by-segment. Click to switch to Studio Track.'
@@ -774,15 +774,15 @@ export default function AudioPlayer({
           {/* Playback Speed Button */}
           <button
             onClick={handleSpeedChange}
-            className="boxed-btn px-1.5 sm:px-2.5 py-1 text-[10px] sm:text-[11px] font-mono text-[var(--text-main)] hover:bg-[var(--bg-hover)] cursor-pointer rounded-full active:scale-95 transition-all shrink-0"
+            className="boxed-btn px-1.5 sm:px-2 py-1 text-[10px] sm:text-[11px] font-mono text-[var(--text-main)] hover:bg-[var(--bg-hover)] cursor-pointer rounded-full active:scale-95 transition-all shrink-0"
             title="Cycle playback speed"
             aria-label={`Playback speed: ${speed}x`}
           >
             <span>{formatSpeed(speed)}</span>
           </button>
 
-          {/* Expand Reader Button */}
-          {currentChapter?.id && (
+          {/* Expand Reader Button (shown only outside ReaderView) */}
+          {!isInReader && currentChapter?.id && (
             <a
               href={`/reader/${currentChapter.id}`}
               onClick={(e) => {
@@ -792,7 +792,7 @@ export default function AudioPlayer({
                   window.dispatchEvent(new PopStateEvent('popstate'));
                 }
               }}
-              className="boxed-btn px-2.5 py-1 text-[11px] font-mono text-[var(--text-main)] hover:bg-[var(--bg-hover)] cursor-pointer hidden md:flex items-center gap-1 rounded-full active:scale-95 transition-all"
+              className="boxed-btn px-2 py-1 text-[11px] font-mono text-[var(--text-main)] hover:bg-[var(--bg-hover)] cursor-pointer hidden md:flex items-center gap-1 rounded-full active:scale-95 transition-all shrink-0"
               title="Expand Reader"
               aria-label="Expand Reader"
             >

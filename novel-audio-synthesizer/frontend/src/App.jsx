@@ -1150,6 +1150,8 @@ function AppContent() {
                   }}
                   ttsEngine={audioSync.ttsEngine}
                   onChangeTtsEngine={audioSync.setTtsEngine}
+                  onSetVolume={audioSync.setVolumeState}
+                  isInReader={view === 'reader'}
                   isFollowingAlong={isFollowingAlong}
                   onToggleFollowAlong={() => setIsFollowingAlong((prev) => !prev)}
                   onSeekSegment={(dir) => {

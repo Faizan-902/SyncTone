@@ -203,6 +203,8 @@ export function useAudioSync(timeline = [], onSegmentChangeOrOptions = null, may
   const ttsRafRef = useRef(0);
   const speechFallbackTimerRef = useRef(null);
   const playbackRateRef = useRef(1.0);
+  const volumeRef = useRef(1.0);
+  const mutedRef = useRef(false);
   const [playbackRate, setPlaybackRateState] = useState(1.0);
   const lastActiveSegIdRef = useRef(-1);
   const lastClockUpdateRef = useRef(0);
@@ -451,6 +453,7 @@ export function useAudioSync(timeline = [], onSegmentChangeOrOptions = null, may
       if (chosenVoice) {
         utterance.voice = chosenVoice;
       }
+      utterance.volume = mutedRef.current ? 0 : volumeRef.current;
 
       // Assign character pitch & rate
       const globalRate = playbackRateRef.current || 1.0;
@@ -605,6 +608,21 @@ export function useAudioSync(timeline = [], onSegmentChangeOrOptions = null, may
           ? { ...entry, character_id: resolvedCharacterId, gender: entryGender || entry.gender }
           : entry;
 
+      let timbrePitchSt = 0;
+      let timbreCadence = 1.0;
+      try {
+        const rawTimbre = typeof localStorage !== 'undefined' ? localStorage.getItem('synctone_timbre_settings') : null;
+        if (rawTimbre) {
+          const parsedTimbre = JSON.parse(rawTimbre);
+          if (Number.isFinite(Number(parsedTimbre?.pitchOffset))) {
+            timbrePitchSt = Math.max(-6, Math.min(6, Number(parsedTimbre.pitchOffset)));
+          }
+          if (Number.isFinite(Number(parsedTimbre?.cadenceRate)) && Number(parsedTimbre.cadenceRate) > 0) {
+            timbreCadence = Math.max(0.5, Math.min(1.5, Number(parsedTimbre.cadenceRate)));
+          }
+        }
+      } catch (_) {}
+
       let speakUrl =
         `/api/voices/speak?text=${encodeURIComponent(cleanText)}` +
         `&voice_id=${encodeURIComponent(targetVoiceId)}` +
@@ -614,6 +632,16 @@ export function useAudioSync(timeline = [], onSegmentChangeOrOptions = null, may
         `&is_narrator=${isNarrator}` +
         `&novel_id=${encodeURIComponent(novelId)}` +
         `&chapter_id=${encodeURIComponent(chapterId)}`;
+
+      if (targetVoiceId) {
+        speakUrl += '&explicit_voice=true';
+      }
+      if (timbrePitchSt !== 0) {
+        speakUrl += `&pitch_st=${encodeURIComponent(String(timbrePitchSt))}`;
+      }
+      if (timbreCadence !== 1.0) {
+        speakUrl += `&speed=${encodeURIComponent(String(timbreCadence))}`;
+      }
 
       if (entryGender) {
         speakUrl += `&gender=${encodeURIComponent(entryGender)}`;
@@ -715,6 +743,8 @@ export function useAudioSync(timeline = [], onSegmentChangeOrOptions = null, may
         const secAudio = secondaryAudioRef.current;
         secAudio.src = cachedBlobUrl || speakUrl;
         secAudio.playbackRate = playbackRateRef.current || 1.0;
+        secAudio.volume = volumeRef.current;
+        secAudio.muted = mutedRef.current;
 
         let secRafActive = false;
         const cancelSecRaf = () => {
@@ -1124,6 +1154,23 @@ export function useAudioSync(timeline = [], onSegmentChangeOrOptions = null, may
     }
   }, []);
 
+  const setVolumeState = useCallback(({ volume, muted } = {}) => {
+    if (typeof volume === 'number' && Number.isFinite(volume)) {
+      volumeRef.current = Math.max(0, Math.min(1, volume));
+    }
+    if (typeof muted === 'boolean') {
+      mutedRef.current = muted;
+    }
+    if (audioRef.current) {
+      audioRef.current.volume = volumeRef.current;
+      audioRef.current.muted = mutedRef.current;
+    }
+    if (secondaryAudioRef.current) {
+      secondaryAudioRef.current.volume = volumeRef.current;
+      secondaryAudioRef.current.muted = mutedRef.current;
+    }
+  }, []);
+
   const togglePlaybackMode = useCallback((targetMode) => {
     // Never corrupt playbackMode state with event objects
     const validMode =
@@ -1182,7 +1229,19 @@ export function useAudioSync(timeline = [], onSegmentChangeOrOptions = null, may
 
       // 2. Maintain current timestamp position in audioRef (do NOT reset clock to 0:00)
       if (audioRef.current) {
-        audioRef.current.currentTime = Math.max(0, currentTimeMs / 1000);
+        const targetSec = Math.max(0, currentTimeMs / 1000);
+        try {
+          if (audioRef.current.readyState >= 1) {
+            audioRef.current.currentTime = targetSec;
+          } else {
+            const onReadySeek = () => {
+              try {
+                if (audioRef.current) audioRef.current.currentTime = targetSec;
+              } catch (_) {}
+            };
+            audioRef.current.addEventListener?.('loadedmetadata', onReadySeek, { once: true });
+          }
+        } catch (_) {}
         if (isPlaying) {
           audioRef.current.play().catch(() => {});
         }
@@ -1227,6 +1286,7 @@ export function useAudioSync(timeline = [], onSegmentChangeOrOptions = null, may
     pause,
     toggle,
     setPlaybackRate,
+    setVolumeState,
     handlePlay,
     handlePause,
     handleEnded,

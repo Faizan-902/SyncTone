@@ -85,7 +85,6 @@ export default function AuthModal({ isOpen, onClose, initialMode = 'login' }) {
     setGithubPanelOpen(false);
     setGithubUsername('');
     setGithubToken('');
-    setShowGithubTokenInput(false);
     setValidationError('');
     clearError?.();
     onClose();

@@ -1088,8 +1088,12 @@ html.light .novel-card-hybrid::after {
 /* ========================================================================= */
 body.focus-fullscreen-mode aside,
 body.focus-fullscreen-mode nav[aria-label="Mobile Navigation"],
-body.focus-fullscreen-mode header {
+body.focus-fullscreen-mode header.top-app-header {
   display: none !important;
+}
+body.focus-fullscreen-mode .reader-floating-toolbar {
+  top: 0 !important;
+  z-index: 45 !important;
 }
 body.focus-fullscreen-mode .md\:pl-\[72px\] {
   padding-left: 0 !important;
@@ -1866,7 +1870,7 @@ body.focus-fullscreen-mode footer {
 .reader-floating-toolbar {
   position: sticky;
   top: 56px;
-  z-index: 30;
+  z-index: 40;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1946,6 +1950,8 @@ body.focus-fullscreen-mode footer {
 
 .reader-opening-para {
   text-indent: 0 !important;
+  overflow: hidden;
+  padding-top: 2px;
 }
 
 .reader-opening-para::first-letter,

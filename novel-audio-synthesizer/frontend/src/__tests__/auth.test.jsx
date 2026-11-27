@@ -166,6 +166,10 @@ describe('Milestone 1 — API Client & Cookie Authentication', () => {
       expect(options).toContain('reader');
       expect(options).toContain('writer');
       expect(options).not.toContain('admin');
+
+      // Clicking close invokes onClose cleanly without throwing
+      fireEvent.click(screen.getByRole('button', { name: /close/i }));
+      expect(handleClose).toHaveBeenCalledTimes(1);
     });
   });
 });
