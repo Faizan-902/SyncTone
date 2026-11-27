@@ -692,6 +692,20 @@ CREATE TABLE IF NOT EXISTS auth_challenges (
 
 CREATE INDEX IF NOT EXISTS ix_auth_challenges_expires_at ON auth_challenges(expires_at);
 
+CREATE TABLE IF NOT EXISTS chapter_documents (
+    pg_chapter_id UUID PRIMARY KEY REFERENCES chapters(id) ON DELETE CASCADE,
+    novel_id UUID NOT NULL REFERENCES novels(id) ON DELETE CASCADE,
+    chapter_number INTEGER NOT NULL DEFAULT 1,
+    title VARCHAR(255) NOT NULL,
+    raw_text TEXT NOT NULL DEFAULT '',
+    segments JSONB NOT NULL DEFAULT '[]'::jsonb,
+    manifest JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS ix_chapter_documents_novel_id ON chapter_documents(novel_id);
+
 -- Enable Row-Level Security (RLS) on all tables in the public schema
 ALTER TABLE IF EXISTS public.users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS public.voices ENABLE ROW LEVEL SECURITY;
@@ -709,6 +723,7 @@ ALTER TABLE IF EXISTS public.alembic_version ENABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS public.oauth_accounts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS public.user_passkeys ENABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS public.auth_challenges ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS public.chapter_documents ENABLE ROW LEVEL SECURITY;
 
 ALTER VIEW IF EXISTS public.v_synthesis_jobs SET (security_invoker = true);
 ALTER VIEW IF EXISTS public.v_character_aliases SET (security_invoker = true);

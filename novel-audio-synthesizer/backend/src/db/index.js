@@ -72,6 +72,19 @@ CREATE TABLE IF NOT EXISTS auth_challenges (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS ix_auth_challenges_expires_at ON auth_challenges(expires_at);
+
+CREATE TABLE IF NOT EXISTS chapter_documents (
+    pg_chapter_id UUID PRIMARY KEY REFERENCES chapters(id) ON DELETE CASCADE,
+    novel_id UUID NOT NULL REFERENCES novels(id) ON DELETE CASCADE,
+    chapter_number INTEGER NOT NULL DEFAULT 1,
+    title VARCHAR(255) NOT NULL,
+    raw_text TEXT NOT NULL DEFAULT '',
+    segments JSONB NOT NULL DEFAULT '[]'::jsonb,
+    manifest JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_chapter_documents_novel_id ON chapter_documents(novel_id);
 `;
 
 const RLS_LOCKDOWN_SQL = `
@@ -121,6 +134,7 @@ async function runEnsureAuthSchemaTables(pgPool) {
        to_regclass('public.user_passkeys') AS pk_tbl,
        to_regclass('public.oauth_accounts') AS oa_tbl,
        to_regclass('public.auth_challenges') AS ch_tbl,
+       to_regclass('public.chapter_documents') AS doc_tbl,
        EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND rowsecurity = false) AS has_unprotected_rls,
        EXISTS (
          SELECT 1 FROM pg_class c
@@ -131,10 +145,10 @@ async function runEnsureAuthSchemaTables(pgPool) {
   );
   const row = check.rows[0] || {};
   let changed = false;
-  if (!row.pk_tbl || !row.oa_tbl || !row.ch_tbl) {
+  if (!row.pk_tbl || !row.oa_tbl || !row.ch_tbl || !row.doc_tbl) {
     await pgPool.query(AUTH_EXTENSION_SQL);
     changed = true;
-    console.log('[DB] Applied OAuth & WebAuthn Passkey schema extension');
+    console.log('[DB] Applied OAuth, WebAuthn Passkey & Chapter Document schema extension');
   }
   if (row.has_unprotected_rls || row.has_definer_view || changed) {
     await pgPool.query(RLS_LOCKDOWN_SQL);

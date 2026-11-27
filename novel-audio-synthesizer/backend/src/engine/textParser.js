@@ -115,7 +115,11 @@ const BANNED_ANY_WORD = new Set([
   'chapter', 'section', 'page', 'book', 'volume', 'part', 'figure',
   'voice', 'dialogue', 'character', 'speaker', 'narrator', 'unresolved', 'unknown', 'illustration', 'illustrations', 'image',
   'hold', 'let', 'look', 'wait', 'listen', 'come', 'go', 'stop', 'pray',
-  'indeed', 'yes', 'no', 'well', 'oh', 'ah', 'alas',
+  'indeed', 'yes', 'no', 'well', 'oh', 'ah', 'alas', 'er', 'um', 'uh', 'eh', 'oy', 'hey', 'hi', 'hello', 'bye', 'goodbye', 'hurrah', 'bravo',
+  'happy', 'merry', 'christmas', 'birthday', 'everywhere', 'please', 'thank', 'thanks', 'sorry', 'excuse',
+  'don\'t', 'doesn\'t', 'didn\'t', 'won\'t', 'can\'t', 'couldn\'t', 'wouldn\'t', 'shouldn\'t',
+  'isn\'t', 'aren\'t', 'wasn\'t', 'weren\'t', 'haven\'t', 'hasn\'t', 'hadn\'t',
+  'he\'s', 'she\'s', 'it\'s', 'i\'m', 'you\'re', 'we\'re', 'they\'re', 'there\'s', 'that\'s', 'what\'s', 'let\'s',
   'speaker_a', 'speaker_b', 'dialogue_speaker',
   'and', 'or', 'but', 'nor', 'so', 'for', 'if', 'unless', 'until', 'till', 'while', 'because', 'although', 'though',
 ]);
@@ -124,7 +128,8 @@ const BANNED_ANY_WORD = new Set([
 const BANNED_STANDALONE_NAMES = new Set([
   ...BANNED_ANY_WORD,
   'man', 'woman', 'boy', 'girl', 'child', 'kid', 'person', 'people', 'stranger',
-  'figure', 'shadow', 'one', 'other', 'another', 'both', 'each', 'either', 'neither', 'all',
+  'figure', 'shadow', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve', 'hundred', 'thousand',
+  'other', 'another', 'both', 'each', 'either', 'neither', 'all',
   'first', 'second', 'third', 'last', 'next', 'former', 'latter',
   'sir', 'madam', 'maam', 'yes', 'no', 'oh', 'ah', 'well', 'alas', 'indeed',
   'mr', 'mrs', 'ms', 'miss', 'dr', 'st', 'prof', 'rev', 'sgt', 'capt',

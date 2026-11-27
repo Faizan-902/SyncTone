@@ -160,7 +160,9 @@ export const api = {
     logout: () =>
       api.post('/auth/logout'),
     me: () =>
-      api.get('/auth/me'),
+      api.get('/auth/session'),
+    session: () =>
+      api.get('/auth/session'),
     providers: () =>
       api.get('/auth/providers'),
     oauthNeonSession: (token, provider = 'google') =>

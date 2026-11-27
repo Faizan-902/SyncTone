@@ -1360,6 +1360,17 @@ router.post('/auth/logout', (_req, res) => {
 });
 
 /**
+ * GET /api/auth/session
+ * Non-throwing session status check for initial client hydration (always returns 200).
+ */
+router.get('/auth/session', optionalAuth, (req, res) => {
+  return res.json({
+    authenticated: Boolean(req.user),
+    user: req.user || null,
+  });
+});
+
+/**
  * GET /api/auth/me
  * Returns current authenticated user session.
  */

@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const fs = require('fs');
 const path = require('path');
+const mongoose = require('mongoose');
 const { v4: uuidv4 } = require('uuid');
 const { pool } = require('../db');
 const { Chapter } = require('../models');
@@ -736,9 +737,33 @@ async function healChapterDocument(chapterDoc, novelIdHint = null, pgPool = pool
       chapterDoc.markModified('segments');
       chapterDoc.markModified('manifest');
     }
-    await chapterDoc.save().catch((err) => {
-      console.warn(`[Chapters] Self-healing Mongo save warning for ${chapterId}: ${err.message}`);
-    });
+    if (mongoose.connection.readyState === 1 && typeof chapterDoc.save === 'function') {
+      await chapterDoc.save().catch((err) => {
+        console.warn(`[Chapters] Self-healing Mongo save warning for ${chapterId}: ${err.message}`);
+      });
+    }
+    if (pgPool && UUID_REGEX.test(chapterId) && novelId && UUID_REGEX.test(String(novelId))) {
+      await pgPool.query(
+        `
+        INSERT INTO chapter_documents (pg_chapter_id, novel_id, chapter_number, title, raw_text, segments, manifest)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)
+        ON CONFLICT (pg_chapter_id) DO UPDATE SET
+          raw_text = EXCLUDED.raw_text,
+          segments = EXCLUDED.segments,
+          manifest = EXCLUDED.manifest,
+          updated_at = now();
+        `,
+        [
+          chapterId,
+          novelId,
+          chapterDoc.chapter_number || 1,
+          chapterDoc.title || 'Chapter',
+          chapterDoc.raw_text || '',
+          JSON.stringify(mappedSegments),
+          JSON.stringify(chapterDoc.manifest),
+        ]
+      ).catch(() => {});
+    }
 
     if (novelId && pgPool) {
       await upsertDiscoveredCharactersPg(pgPool, novelId, mappedSegments, { pruneStale: true });
@@ -835,22 +860,50 @@ async function ingestChapter({ novelId, title, text, chapterNumber, requestedBy 
     job.novel_id = novelId;
     job.chapter_id = createdPgChapter.id;
 
-    // 5. Create document in MongoDB (linked via pg_chapter_id) with pre-parsed segments & timeline
-    const mongoDoc = new Chapter({
-      pg_chapter_id: createdPgChapter.id,
-      novel_id: createdPgChapter.novel_id,
-      chapter_number: createdPgChapter.chapter_number,
-      title: createdPgChapter.title,
-      raw_text: text,
-      audio_version: 1,
-      manifest: {
-        total_duration_ms: totalDurationMs,
-        audio_url: `/api/stream/${createdPgChapter.id}`,
-        timeline,
-      },
-      segments: mappedSegments,
-    });
-    await mongoDoc.save();
+    // 5. Persist chapter text, segments & timeline in PostgreSQL chapter_documents (works with or without MongoDB)
+    const chapterManifestObj = {
+      total_duration_ms: totalDurationMs,
+      audio_url: `/api/stream/${createdPgChapter.id}`,
+      timeline,
+    };
+    await client.query(
+      `
+      INSERT INTO chapter_documents (pg_chapter_id, novel_id, chapter_number, title, raw_text, segments, manifest)
+      VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)
+      ON CONFLICT (pg_chapter_id) DO UPDATE SET
+        title = EXCLUDED.title,
+        raw_text = EXCLUDED.raw_text,
+        segments = EXCLUDED.segments,
+        manifest = EXCLUDED.manifest,
+        updated_at = now();
+      `,
+      [
+        createdPgChapter.id,
+        createdPgChapter.novel_id,
+        createdPgChapter.chapter_number,
+        createdPgChapter.title,
+        text,
+        JSON.stringify(mappedSegments),
+        JSON.stringify(chapterManifestObj),
+      ]
+    );
+
+    // 5b. Mirror into MongoDB when connected (linked via pg_chapter_id)
+    let mongoDocId = null;
+    if (mongoose.connection.readyState === 1) {
+      const mongoDoc = new Chapter({
+        pg_chapter_id: createdPgChapter.id,
+        novel_id: createdPgChapter.novel_id,
+        chapter_number: createdPgChapter.chapter_number,
+        title: createdPgChapter.title,
+        raw_text: text,
+        audio_version: 1,
+        manifest: chapterManifestObj,
+        segments: mappedSegments,
+      });
+      await mongoDoc.save();
+      mongoDocId = mongoDoc._id;
+    }
 
     // 6. Commit transaction
     await client.query('COMMIT');
@@ -868,7 +921,7 @@ async function ingestChapter({ novelId, title, text, chapterNumber, requestedBy 
     return {
       chapter: createdPgChapter,
       job,
-      mongo_id: mongoDoc._id,
+      mongo_id: mongoDocId,
     };
   } catch (err) {
     if (client && !clientReleased) {
@@ -2044,8 +2097,52 @@ async function hasPersistedChapterAudio(chapterId, swiftAudioObject) {
 }
 
 /**
+ * Finds a chapter document from MongoDB (if connected), falling back to PostgreSQL `chapter_documents`
+ * and finally hardcoded public-domain catalog entries.
+ */
+async function findChapterDocWithFallback(chapterId) {
+  if (mongoose.connection.readyState === 1) {
+    try {
+      const mDoc = await Chapter.findOne({ pg_chapter_id: chapterId });
+      if (mDoc) return mDoc;
+    } catch (_) {}
+  }
+
+  if (UUID_REGEX.test(chapterId)) {
+    try {
+      const docRes = await pool.query(
+        'SELECT pg_chapter_id, novel_id, chapter_number, title, raw_text, segments, manifest FROM chapter_documents WHERE pg_chapter_id = $1::uuid LIMIT 1',
+        [chapterId]
+      );
+      if (docRes.rows.length > 0) {
+        const row = docRes.rows[0];
+        return {
+          pg_chapter_id: row.pg_chapter_id,
+          novel_id: row.novel_id,
+          chapter_number: row.chapter_number,
+          title: row.title,
+          raw_text: row.raw_text || '',
+          segments: Array.isArray(row.segments) ? row.segments : [],
+          manifest: row.manifest && typeof row.manifest === 'object' ? row.manifest : {},
+        };
+      }
+    } catch (_) {}
+  }
+
+  try {
+    const { findPublicDomainChapterById } = require('../data/publicDomainCatalog');
+    if (typeof findPublicDomainChapterById === 'function') {
+      const pdChapter = findPublicDomainChapterById(chapterId);
+      if (pdChapter) return pdChapter;
+    }
+  } catch (_) {}
+
+  return null;
+}
+
+/**
  * 6b. GET /api/chapters/:id
- * Fetches combined PostgreSQL metadata and MongoDB document details in parallel.
+ * Fetches combined PostgreSQL metadata and MongoDB/Postgres document details in parallel.
  */
 router.get('/chapters/:id', async (req, res) => {
   const { id } = req.params;
@@ -2057,7 +2154,7 @@ router.get('/chapters/:id', async (req, res) => {
       UUID_REGEX.test(id)
         ? pool.query('SELECT * FROM chapters WHERE id = $1', [id])
         : Promise.resolve({ rows: [] }),
-      Chapter.findOne({ pg_chapter_id: id }),
+      findChapterDocWithFallback(id),
     ]);
     const pgData = pgRes.rows.length > 0 ? pgRes.rows[0] : {};
 
@@ -2169,7 +2266,7 @@ router.get('/chapters/:id/segments', async (req, res) => {
     return res.status(400).json({ error: 'Invalid chapter ID format.' });
   }
   try {
-    const chapterDoc = await Chapter.findOne({ pg_chapter_id: id });
+    const chapterDoc = await findChapterDocWithFallback(id);
     if (chapterDoc && needsSelfHealingReparse(chapterDoc)) {
       await healChapterDocument(chapterDoc, chapterDoc.novel_id, pool);
     }
@@ -2197,7 +2294,7 @@ router.get('/manifest/:chapter_id', async (req, res) => {
   }
 
   try {
-    const chapterDoc = await Chapter.findOne({ pg_chapter_id: chapter_id });
+    const chapterDoc = await findChapterDocWithFallback(chapter_id);
     if (!chapterDoc) {
       return res.status(404).json({ detail: 'Chapter not found' });
     }
@@ -2268,7 +2365,7 @@ router.get('/characters/:chapter_id', async (req, res) => {
   }
 
   try {
-    const chapterDoc = await Chapter.findOne({ pg_chapter_id: chapter_id });
+    const chapterDoc = await findChapterDocWithFallback(chapter_id);
     if (!chapterDoc || !chapterDoc.segments || chapterDoc.segments.length === 0) {
       return res.status(404).json({ detail: 'Chapter not found or not yet parsed.' });
     }

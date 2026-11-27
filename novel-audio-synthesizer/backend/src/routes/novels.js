@@ -4,6 +4,7 @@ const path = require('path');
 const os = require('os');
 const child_process = require('child_process');
 const multer = require('multer');
+const mongoose = require('mongoose');
 const { pool } = require('../db');
 const { Chapter } = require('../models');
 const { parseChapter } = require('../engine/textParser');
@@ -670,7 +671,6 @@ router.post('/novels', optionalAuth, async (req, res) => {
           );
           const pgChapter = chRes.rows[0];
 
-          // Insert into MongoDB Chapter model (fail & rollback PG transaction if Mongo save fails)
           const nonEmptySegments = mappedSegments.filter(
             (s) => s && typeof s.text === 'string' && s.text.trim().length > 0
           );
@@ -678,21 +678,49 @@ router.post('/novels', optionalAuth, async (req, res) => {
             (rawText && String(rawText).trim()) ||
             nonEmptySegments.map((s) => s.text.trim()).join('\n\n') ||
             chTitle;
-          const mongoDoc = new Chapter({
-            pg_chapter_id: pgChapter.id,
-            novel_id: createdNovel.id,
-            chapter_number: chNum,
-            title: chTitle,
-            raw_text: safeRawText,
-            audio_version: 1,
-            manifest: {
-              total_duration_ms: totalDurationMs,
-              audio_url: `/api/stream/${pgChapter.id}`,
-              timeline,
-            },
-            segments: nonEmptySegments,
-          });
-          await mongoDoc.save();
+          const chapterManifestObj = {
+            total_duration_ms: totalDurationMs,
+            audio_url: `/api/stream/${pgChapter.id}`,
+            timeline,
+          };
+
+          // Persist full chapter text, segments, and manifest in PostgreSQL (primary/resilient store)
+          await client.query(
+            `
+            INSERT INTO chapter_documents (pg_chapter_id, novel_id, chapter_number, title, raw_text, segments, manifest)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)
+            ON CONFLICT (pg_chapter_id) DO UPDATE SET
+              title = EXCLUDED.title,
+              raw_text = EXCLUDED.raw_text,
+              segments = EXCLUDED.segments,
+              manifest = EXCLUDED.manifest,
+              updated_at = now();
+            `,
+            [
+              pgChapter.id,
+              createdNovel.id,
+              chNum,
+              chTitle,
+              safeRawText,
+              JSON.stringify(nonEmptySegments),
+              JSON.stringify(chapterManifestObj),
+            ]
+          );
+
+          // Mirror into MongoDB when connected (non-fatal if MongoDB is offline in cloud/serverless)
+          if (mongoose.connection.readyState === 1) {
+            const mongoDoc = new Chapter({
+              pg_chapter_id: pgChapter.id,
+              novel_id: createdNovel.id,
+              chapter_number: chNum,
+              title: chTitle,
+              raw_text: safeRawText,
+              audio_version: 1,
+              manifest: chapterManifestObj,
+              segments: nonEmptySegments,
+            });
+            await mongoDoc.save();
+          }
 
           createdChapters.push(pgChapter);
         }
@@ -822,7 +850,7 @@ router.get('/novels/:id', async (req, res) => {
     // Self-heal chapters with broken attribution (>50% dialogue unresolved or all dialogue sharing narrator voice)
     // and ensure discovered characters are synced to PostgreSQL
     let novelRow = novelRes.rows[0];
-    if (chaptersRes.rows.length > 0) {
+    if (mongoose.connection.readyState === 1 && chaptersRes.rows.length > 0) {
       try {
         const mongoChapters = await Chapter.find({ novel_id: id }).sort({ chapter_number: 1 }).limit(100);
         let healedAny = false;

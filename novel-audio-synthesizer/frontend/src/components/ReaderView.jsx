@@ -754,7 +754,7 @@ export default function ReaderView({
                 <select
                   value={currentChapter?.id}
                   onChange={(e) => onSelectChapter?.(e.target.value)}
-                  className="boxed-btn px-2 py-0.5 text-xs font-mono font-semibold bg-[var(--bg-card)] text-[var(--text-main)] cursor-pointer focus:outline-none appearance-none pr-4 truncate max-w-[90px] sm:max-w-[180px]"
+                  className="boxed-btn px-2 py-0.5 text-xs font-mono font-semibold bg-[var(--bg-card)] text-[var(--text-main)] cursor-pointer focus:outline-none appearance-none pr-6 truncate max-w-[90px] sm:max-w-[180px]"
                   aria-label="Select Chapter"
                 >
                   {chapters.map((ch) => (
@@ -767,7 +767,7 @@ export default function ReaderView({
                     </option>
                   ))}
                 </select>
-                <span className="pointer-events-none text-[9px] text-[var(--text-muted)] -ml-3">▾</span>
+                <span className="pointer-events-none absolute right-2 text-[9px] text-[var(--text-muted)]" aria-hidden="true">▾</span>
               </div>
               <button
                 type="button"
@@ -895,7 +895,7 @@ export default function ReaderView({
           </button>
 
           {/* Reading Content Stage: Strictly 60-75ch Measure */}
-          <main className="reader-content-stage">
+          <section className="reader-content-stage" aria-label="Chapter reading stage">
             <header className="reader-book-header select-none">
               <div className="mono-xs" style={{ color: 'var(--text-muted)', marginBottom: '8px' }}>
                 {currentNovel?.title ? currentNovel.title.toUpperCase() : 'THE ADVENTURES OF SHERLOCK HOLMES'}
@@ -1026,7 +1026,7 @@ export default function ReaderView({
                 </div>
               )}
             </article>
-          </main>
+          </section>
         </div>
       )}
     </div>

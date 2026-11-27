@@ -10,16 +10,18 @@ async function ensureInitialized() {
   }
   if (!initPromise) {
     initPromise = (async () => {
-      const results = await Promise.allSettled([
+      const [mongoRes, pgRes] = await Promise.allSettled([
         connectMongo(),
         connectPostgres().then(async () => {
           const { ensureVoiceCatalog } = require('../novel-audio-synthesizer/backend/src/scripts/seedDemos');
           await ensureVoiceCatalog(pool);
         }),
       ]);
-      const failures = results.filter((r) => r.status === 'rejected');
-      if (failures.length > 0) {
-        failures.forEach((f) => console.warn('[Vercel DB] Init warning:', f.reason?.message || f.reason));
+      if (mongoRes.status === 'rejected') {
+        console.warn('[Vercel DB] MongoDB unavailable (using PostgreSQL fallback):', mongoRes.reason?.message || mongoRes.reason);
+      }
+      if (pgRes.status === 'rejected') {
+        console.warn('[Vercel DB] Postgres init warning:', pgRes.reason?.message || pgRes.reason);
         initPromise = null;
       }
     })();

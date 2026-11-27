@@ -221,21 +221,31 @@ const MACHINE_EXTRA_VOICE_LIST = [
 
 const FEMALE_KEYWORDS_LIST = [
   'hermione', 'granger', 'mcgonagall', 'petunia', 'lily', 'ginny', 'luna', 'molly',
-  'irene', 'adler', 'hudson', 'mary', 'alice', 'elizabeth', 'jane', 'emma',
+  'trelawney', 'pomfrey', 'hooch', 'pomona', 'sprout', 'angelina', 'narcissa', 'bellatrix',
+  'irene', 'adler', 'hudson', 'mary', 'alice', 'elizabeth', 'bennet', 'jane', 'emma', 'lydia', 'kitty',
   'mrs', 'ms', 'miss', 'lady', 'aunt', 'mother', 'sister', 'queen', 'princess',
-  'clara', 'helen', 'violet', 'margaret', 'catherine', 'anne', 'charlotte', 'eleanor',
-  'sophia', 'grace', 'rose', 'lucy', 'martha', 'hannah', 'emily', 'rachel',
+  'clara', 'helen', 'violet', 'margaret', 'catherine', 'cathy', 'anne', 'charlotte', 'eleanor',
+  'sophia', 'grace', 'rose', 'lucy', 'mina', 'martha', 'hannah', 'emily', 'rachel',
   'rebecca', 'laura', 'anna', 'kate', 'julia', 'edith', 'elsie', 'hatty',
+  'daisy', 'jordan', 'myrtle', 'estella', 'havisham', 'nelly', 'isabella', 'adele', 'bertha',
+  'sibyl', 'mercedes', 'haydee', 'penelope', 'athena', 'circe', 'calypso', 'grete',
 ];
 
 const MALE_KEYWORDS_LIST = [
   'sherlock', 'holmes', 'watson', 'lestrade', 'moriarty', 'mycroft', 'jabez',
   'harry', 'potter', 'ron', 'weasley', 'dumbledore', 'albus', 'snape', 'severus',
   'draco', 'malfoy', 'hagrid', 'rubeus', 'neville', 'vernon', 'dudley',
+  'argus', 'filch', 'dedalus', 'diggle', 'garrick', 'ollivander', 'griphook', 'quirrell',
+  'firenze', 'ronan', 'bane', 'seamus', 'dean', 'percy', 'oliver', 'fudge', 'cornelius',
   'mr', 'sir', 'lord', 'uncle', 'father', 'brother', 'king', 'prince', 'inspector',
   'john', 'henry', 'charles', 'arthur', 'james', 'william', 'edward', 'george',
   'fred', 'frank', 'peter', 'paul', 'david', 'michael', 'robert', 'richard',
   'thomas', 'daniel', 'joseph', 'victor', 'simon', 'gregory', 'wilson',
+  'darcy', 'bingley', 'wickham', 'collins', 'gatsby', 'nick', 'carraway', 'buchanan',
+  'dorian', 'wotton', 'basil', 'hallward', 'edmond', 'dantes', 'faria', 'villefort', 'danglars',
+  'ishmael', 'ahab', 'queequeg', 'starbuck', 'rochester', 'heathcliff', 'linton',
+  'jekyll', 'hyde', 'utterson', 'lanyon', 'silver', 'flint', 'hawkins', 'odysseus', 'telemachus',
+  'gregor', 'samsa', 'pip', 'magwitch', 'carton', 'manette', 'darnay', 'buck', 'thornton',
 ];
 
 // Named character speaker_name matching ONLY (never matched against spoken quote text)

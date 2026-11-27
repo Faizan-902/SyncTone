@@ -20,6 +20,7 @@ ALTER TABLE IF EXISTS public.alembic_version ENABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS public.oauth_accounts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS public.user_passkeys ENABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS public.auth_challenges ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS public.chapter_documents ENABLE ROW LEVEL SECURITY;
 
 ALTER VIEW IF EXISTS public.v_synthesis_jobs SET (security_invoker = true);
 ALTER VIEW IF EXISTS public.v_character_aliases SET (security_invoker = true);

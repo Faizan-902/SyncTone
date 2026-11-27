@@ -5,10 +5,11 @@ const PLACEHOLDER_UPLOADER_USERNAMES = new Set([
   'moderator',
   'uploader',
   'synctone',
+  'demo_author',
 ]);
 
 const KNOWN_CLASSIC_AUTHORS = [
-  [/sherlock\s+holmes|scandal\s+in\s+bohemia|hound\s+of\s+the\s+baskervilles|sign\s+of\s+the?\s*four|study\s+in\s+scarlet|valley\s+of\s+fear/i, 'Sir Arthur Conan Doyle'],
+  [/sherlock\s+holmes|scandal\s+in\s+bohemia|hound\s+of\s+the\s+baskervilles|sign\s+of\s+the?\s*four|study\s+in\s+scarlet|valley\s+of\s+fear/i, 'Arthur Conan Doyle'],
   [/harry\s+potter/i, 'J.K. Rowling'],
   [/\bdracula\b/i, 'Bram Stoker'],
   [/\bfrankenstein\b/i, 'Mary Shelley'],
@@ -18,9 +19,14 @@ const KNOWN_CLASSIC_AUTHORS = [
   [/alice.*wonderland|through\s+the\s+looking[\s-]+glass/i, 'Lewis Carroll'],
   [/count\s+of\s+monte\s+cristo/i, 'Alexandre Dumas'],
   [/picture\s+of\s+dorian\s+gray/i, 'Oscar Wilde'],
-  [/\bnineteen\s+eighty[\s-]+four\b|\b1984\b|animal\s+farm/i, 'George Orwell'],
-  [/strange\s+case\s+of\s+dr\.?\s*jekyll/i, 'Robert Louis Stevenson'],
+  [/jane\s+eyre/i, 'Charlotte Brontë'],
+  [/wuthering\s+heights/i, 'Emily Brontë'],
+  [/great\s+expectations|tale\s+of\s+two\s+cities|oliver\s+twist|christmas\s+carol/i, 'Charles Dickens'],
+  [/treasure\s+island|strange\s+case\s+of\s+dr\.?\s*jekyll/i, 'Robert Louis Stevenson'],
   [/time\s+machine|war\s+of\s+the\s+worlds/i, 'H.G. Wells'],
+  [/\bodyssey\b/i, 'Homer'],
+  [/\bmetamorphosis\b/i, 'Franz Kafka'],
+  [/call\s+of\s+the\s+wild/i, 'Jack London'],
 ];
 
 /**
