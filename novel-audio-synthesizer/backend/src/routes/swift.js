@@ -156,17 +156,22 @@ router.get('/chapters/:id/audio', async (req, res) => {
     // Fallback to local audio file if available
     const fs = require('fs');
     const path = require('path');
-    const audioPathMp3 = path.join(config.paths.outputDir, `${id}.mp3`);
-    const audioPathWav = path.join(config.paths.outputDir, `${id}.wav`);
-    const fallbackPath = fs.existsSync(audioPathMp3)
-      ? audioPathMp3
-      : (fs.existsSync(audioPathWav) ? audioPathWav : null);
+    const candidateFiles = [
+      path.join(config.paths.outputDir, `${id}.mp3`),
+      path.join(config.paths.outputDir, `${id}.opus`),
+      path.join(config.paths.outputDir, `${id}.wav`),
+    ];
+    const fallbackPath = candidateFiles.find((filePath) => fs.existsSync(filePath)) || null;
 
     if (fallbackPath) {
       const stat = fs.statSync(fallbackPath);
       const fileSize = stat.size;
       const range = req.headers.range;
-      const contentType = fallbackPath.endsWith('.mp3') ? 'audio/mpeg' : 'audio/wav';
+      const contentType = fallbackPath.endsWith('.mp3')
+        ? 'audio/mpeg'
+        : fallbackPath.endsWith('.opus')
+          ? 'audio/opus'
+          : 'audio/wav';
 
       if (range) {
         const parsedRange = parseByteRange(range, fileSize);
@@ -192,6 +197,15 @@ router.get('/chapters/:id/audio', async (req, res) => {
       }
     }
 
+    const isUpstreamOffline =
+      err?.code === 'ECONNREFUSED' ||
+      err?.code === 'ENOTFOUND' ||
+      err?.code === 'ETIMEDOUT' ||
+      err?.code === 'ECONNABORTED' ||
+      Boolean(err?.errors);
+    if (isUpstreamOffline) {
+      return res.status(503).json({ error: 'Object storage unavailable and no local audio fallback found' });
+    }
     return res.status(500).json({ error: 'Failed to stream audio from object storage' });
   }
 });

@@ -26,11 +26,18 @@ const REQUIRED_VOICES = [
   { id: 'en-GB-RyanNeural', label: 'Ryan Neural (British Narrator)', gender: 'male', age_band: 'adult', language: 'en-gb', reserved_narrator: true },
   { id: 'en-GB-ThomasNeural', label: 'Thomas Neural (Harry Potter)', gender: 'male', age_band: 'young', language: 'en-gb', reserved_narrator: false },
   { id: 'en-GB-LibbyNeural', label: 'Libby Neural (Hermione Granger)', gender: 'female', age_band: 'young', language: 'en-gb', reserved_narrator: false },
-  { id: 'en-GB-AlfieNeural', label: 'Alfie Neural (Ron Weasley)', gender: 'male', age_band: 'young', language: 'en-gb', reserved_narrator: false },
-  { id: 'en-GB-ArthurNeural', label: 'Arthur Neural (Albus Dumbledore)', gender: 'male', age_band: 'elder', language: 'en-gb', reserved_narrator: false },
-  { id: 'en-GB-NoahNeural', label: 'Noah Neural (Severus Snape)', gender: 'male', age_band: 'adult', language: 'en-gb', reserved_narrator: false },
+  { id: 'en-NZ-MitchellNeural', label: 'Mitchell Neural (Ron Weasley)', gender: 'male', age_band: 'young', language: 'en-nz', reserved_narrator: false },
+  { id: 'en-IE-ConnorNeural', label: 'Connor Neural (Albus Dumbledore)', gender: 'male', age_band: 'elder', language: 'en-ie', reserved_narrator: false },
+  { id: 'en-US-RogerNeural', label: 'Roger Neural (Severus Snape)', gender: 'male', age_band: 'adult', language: 'en-us', reserved_narrator: false },
   { id: 'en-GB-SoniaNeural', label: 'Sonia Neural (Prof. McGonagall)', gender: 'female', age_band: 'adult', language: 'en-gb', reserved_narrator: false },
-  { id: 'en-GB-OliverNeural', label: 'Oliver Neural (Draco Malfoy)', gender: 'male', age_band: 'young', language: 'en-gb', reserved_narrator: false },
+  { id: 'en-AU-WilliamMultilingualNeural', label: 'William Neural (Draco Malfoy)', gender: 'male', age_band: 'young', language: 'en-au', reserved_narrator: false },
+  { id: 'en-CA-LiamNeural', label: 'Liam Neural (Commonwealth Male)', gender: 'male', age_band: 'adult', language: 'en-ca', reserved_narrator: false },
+  { id: 'en-GB-MaisieNeural', label: 'Maisie Neural (British Young Female)', gender: 'female', age_band: 'young', language: 'en-gb', reserved_narrator: false },
+  { id: 'en-US-SteffanNeural', label: 'Steffan Neural (Deep Gruff Male)', gender: 'male', age_band: 'adult', language: 'en-us', reserved_narrator: false },
+  { id: 'en-GB-AlfieNeural', label: 'Alfie Neural (Legacy Alias)', gender: 'male', age_band: 'young', language: 'en-gb', reserved_narrator: false },
+  { id: 'en-GB-ArthurNeural', label: 'Arthur Neural (Legacy Alias)', gender: 'male', age_band: 'elder', language: 'en-gb', reserved_narrator: false },
+  { id: 'en-GB-NoahNeural', label: 'Noah Neural (Legacy Alias)', gender: 'male', age_band: 'adult', language: 'en-gb', reserved_narrator: false },
+  { id: 'en-GB-OliverNeural', label: 'Oliver Neural (Legacy Alias)', gender: 'male', age_band: 'young', language: 'en-gb', reserved_narrator: false },
   { id: 'bm_george', label: 'George (British Received)', gender: 'male', age_band: 'adult', language: 'en-gb', reserved_narrator: false },
   { id: 'bm_daniel', label: 'Daniel (British Expressive)', gender: 'male', age_band: 'young', language: 'en-gb', reserved_narrator: false },
   { id: 'bf_emma', label: 'Emma (British Refined)', gender: 'female', age_band: 'young', language: 'en-gb', reserved_narrator: false },
@@ -116,8 +123,11 @@ async function ensureChapterAudio(chapterId, segments, { maxSynthesizeCount = 0 
   const mp3Path = path.join(outputDir, `${chapterId}.mp3`);
   const wavPath = path.join(outputDir, `${chapterId}.wav`);
 
-  if ((fs.existsSync(mp3Path) && fs.statSync(mp3Path).size > 0) ||
-      (fs.existsSync(wavPath) && fs.statSync(wavPath).size > 0)) {
+  if (
+    maxSynthesizeCount === 0 &&
+    ((fs.existsSync(mp3Path) && fs.statSync(mp3Path).size > 0) ||
+      (fs.existsSync(wavPath) && fs.statSync(wavPath).size > 0))
+  ) {
     const isWav = fs.existsSync(wavPath) && (!fs.existsSync(mp3Path) || fs.statSync(wavPath).mtimeMs > fs.statSync(mp3Path).mtimeMs);
     const format = isWav ? 'wav' : 'mp3';
     const shouldUploadCloud =
@@ -151,6 +161,31 @@ async function ensureChapterAudio(chapterId, segments, { maxSynthesizeCount = 0 
     };
   }
 
+  if (
+    maxSynthesizeCount > 0 &&
+    ((fs.existsSync(mp3Path) && fs.statSync(mp3Path).size > 45000) ||
+      (fs.existsSync(wavPath) && fs.statSync(wavPath).size > 45000))
+  ) {
+    const isWav = fs.existsSync(wavPath) && (!fs.existsSync(mp3Path) || fs.statSync(wavPath).mtimeMs > fs.statSync(mp3Path).mtimeMs);
+    const format = isWav ? 'wav' : 'mp3';
+    return {
+      chapter_id: chapterId,
+      audio_stream_url: `/api/stream/${chapterId}`,
+      audio_url: `/api/stream/${chapterId}`,
+      audio_format: format,
+      total_duration_ms: segments.length ? segments[segments.length - 1].end_ms : 0,
+      timeline: segments.map((s) => ({
+        order: s.order,
+        segment_id: s.segment_id,
+        start_ms: s.start_ms,
+        end_ms: s.end_ms,
+        character_id: s.character_id,
+        voice_id: s.voice_id,
+        text: s.text,
+      })),
+    };
+  }
+
   console.log(`  [Audio] Generating playback demo audio for chapter ${chapterId} (maxSynth: ${maxSynthesizeCount})...`);
   const segmentAudios = new Array(segments.length);
   let synthFormat = 'mp3';
@@ -162,7 +197,12 @@ async function ensureChapterAudio(chapterId, segments, { maxSynthesizeCount = 0 
     const durationMs = (seg.end_ms && seg.start_ms) ? (seg.end_ms - seg.start_ms) : (seg.duration_ms || 2500);
 
     try {
-      const result = await ttsEngine.synthesizeSegment(seg.text, seg.voice_id);
+      const result = await ttsEngine.synthesizeSegment(seg.text, seg.voice_id, 1.0, 'auto', {
+        characterId: seg.character_id || seg.speaker_id || '',
+        speakerName: seg.speaker_name || '',
+        isNarrator: seg.type === 'narration' || String(seg.character_id || '').toLowerCase() === 'narrator',
+        explicitVoice: Boolean(seg.voice_id && seg.voice_id !== 'en-GB-RyanNeural'),
+      });
       if (result && result.audio_buffer && result.audio_buffer.length > 0) {
         synthFormat = result.format || 'mp3';
         const dur = result.duration_ms || durationMs;
@@ -440,7 +480,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'Ron Weasley',
-      voiceId: 'en-GB-AlfieNeural',
+      voiceId: 'en-NZ-MitchellNeural',
       gender: 'male',
       ageBand: 'young',
       temperament: 'Loyal, Humorous, Reluctant',
@@ -470,7 +510,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'Albus Dumbledore',
-      voiceId: 'en-GB-ArthurNeural',
+      voiceId: 'en-IE-ConnorNeural',
       gender: 'male',
       ageBand: 'elder',
       temperament: 'Benevolent, Serene, Enigmatic',
@@ -490,7 +530,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'Severus Snape',
-      voiceId: 'en-GB-NoahNeural',
+      voiceId: 'en-US-RogerNeural',
       gender: 'male',
       ageBand: 'adult',
       temperament: 'Austere, Sardonic, Disdainful',
@@ -500,7 +540,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'Draco Malfoy',
-      voiceId: 'en-GB-OliverNeural',
+      voiceId: 'en-AU-WilliamMultilingualNeural',
       gender: 'male',
       ageBand: 'young',
       temperament: 'Arrogant, Sneering, Aristocratic',
@@ -510,7 +550,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'Vernon Dursley',
-      voiceId: 'en-GB-ArthurNeural',
+      voiceId: 'en-IE-ConnorNeural',
       gender: 'male',
       ageBand: 'adult',
       temperament: 'Pompous, Choleric, Conventional',
@@ -530,7 +570,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'Dudley Dursley',
-      voiceId: 'en-GB-AlfieNeural',
+      voiceId: 'en-NZ-MitchellNeural',
       gender: 'male',
       ageBand: 'young',
       temperament: 'Spoiled, Demanding, Petulant',
@@ -540,7 +580,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'Professor Quirrell',
-      voiceId: 'en-GB-NoahNeural',
+      voiceId: 'en-US-RogerNeural',
       gender: 'male',
       ageBand: 'adult',
       temperament: 'Stuttering, Nervous, Deceptive',
@@ -550,7 +590,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'Neville Longbottom',
-      voiceId: 'en-GB-AlfieNeural',
+      voiceId: 'en-NZ-MitchellNeural',
       gender: 'male',
       ageBand: 'young',
       temperament: 'Timid, Well-meaning, Clumsy',
@@ -580,7 +620,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'Fred Weasley',
-      voiceId: 'en-GB-AlfieNeural',
+      voiceId: 'en-NZ-MitchellNeural',
       gender: 'male',
       ageBand: 'young',
       temperament: 'Mischievous, Witty, High-spirited',
@@ -590,7 +630,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'George Weasley',
-      voiceId: 'en-GB-AlfieNeural',
+      voiceId: 'en-NZ-MitchellNeural',
       gender: 'male',
       ageBand: 'young',
       temperament: 'Mischievous, Quick-witted, Playful',
@@ -620,7 +660,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'Garrick Ollivander',
-      voiceId: 'en-GB-ArthurNeural',
+      voiceId: 'en-IE-ConnorNeural',
       gender: 'male',
       ageBand: 'elder',
       temperament: 'Eerie, Reverent, Perceptive',
@@ -630,7 +670,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'Lord Voldemort',
-      voiceId: 'en-GB-NoahNeural',
+      voiceId: 'en-US-RogerNeural',
       gender: 'male',
       ageBand: 'adult',
       temperament: 'Cold, Sinister, Whispering',
@@ -640,7 +680,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'Argus Filch',
-      voiceId: 'en-GB-ArthurNeural',
+      voiceId: 'en-IE-ConnorNeural',
       gender: 'male',
       ageBand: 'elder',
       temperament: 'Bitter, Sneering, Vindictive',
@@ -670,7 +710,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'Professor Flitwick',
-      voiceId: 'en-GB-ArthurNeural',
+      voiceId: 'en-IE-ConnorNeural',
       gender: 'male',
       ageBand: 'elder',
       temperament: 'Excitable, Cheerful, Scholarly',
@@ -680,7 +720,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'Seamus Finnigan',
-      voiceId: 'en-GB-AlfieNeural',
+      voiceId: 'en-NZ-MitchellNeural',
       gender: 'male',
       ageBand: 'young',
       temperament: 'Good-natured, Energetic, Fiery',
@@ -700,7 +740,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'Lee Jordan',
-      voiceId: 'en-GB-AlfieNeural',
+      voiceId: 'en-NZ-MitchellNeural',
       gender: 'male',
       ageBand: 'young',
       temperament: 'Animated, Partisan, Enthusiastic',
@@ -710,7 +750,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'Firenze',
-      voiceId: 'en-GB-ArthurNeural',
+      voiceId: 'en-IE-ConnorNeural',
       gender: 'male',
       ageBand: 'adult',
       temperament: 'Mystical, Grave, Serene',
@@ -720,7 +760,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'Bane',
-      voiceId: 'en-GB-NoahNeural',
+      voiceId: 'en-US-RogerNeural',
       gender: 'male',
       ageBand: 'adult',
       temperament: 'Stern, Traditionalist, Fierce',
@@ -730,7 +770,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'Ronan',
-      voiceId: 'en-GB-ArthurNeural',
+      voiceId: 'en-IE-ConnorNeural',
       gender: 'male',
       ageBand: 'adult',
       temperament: 'Melancholic, Pensive, Sober',
@@ -1087,6 +1127,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     "SELECT id FROM novels WHERE title = $1 LIMIT 1",
     ["The Adventures of Sherlock Holmes"]
   );
+  const shCoverObject = '/static/covers/adventures-of-sherlock-holmes-cover.webp';
 
   if (shNovelCheck.rows.length > 0) {
     shNovelId = shNovelCheck.rows[0].id;
@@ -1098,12 +1139,14 @@ async function seedDemos({ closeConnections = false } = {}) {
         status = 'published',
         global_tone = 'Victorian Mystery',
         portfolio_source = 'manual',
-        added_by = $2,
+        cover_object = $2,
+        added_by = $3,
         updated_at = now()
-      WHERE id = $3;
+      WHERE id = $4;
     `,
       [
         "A collection of classic detective mysteries in Victorian London featuring Sherlock Holmes and Dr. John Watson.",
+        shCoverObject,
         authorId,
         shNovelId,
       ]
@@ -1111,19 +1154,20 @@ async function seedDemos({ closeConnections = false } = {}) {
   } else {
     const shNovelInsert = await pool.query(
       `
-      INSERT INTO novels (title, synopsis, channel, status, global_tone, portfolio_source, added_by)
-      VALUES ($1, $2, 'verified', 'published', 'Victorian Mystery', 'manual', $3)
+      INSERT INTO novels (title, synopsis, channel, status, global_tone, portfolio_source, cover_object, added_by)
+      VALUES ($1, $2, 'verified', 'published', 'Victorian Mystery', 'manual', $3, $4)
       RETURNING id;
     `,
       [
         "The Adventures of Sherlock Holmes",
         "A collection of classic detective mysteries in Victorian London featuring Sherlock Holmes and Dr. John Watson.",
+        shCoverObject,
         authorId,
       ]
     );
     shNovelId = shNovelInsert.rows[0].id;
   }
-  console.log(`  ✔ Novel ID: ${shNovelId}`);
+  console.log(`  ✔ Novel ID: ${shNovelId} (cover_object: ${shCoverObject})`);
 
   // Cast
   const shCast = [
@@ -1497,10 +1541,12 @@ module.exports = {
   seedDemos,
   REQUIRED_VOICES,
   ensureVoiceCatalog,
+  ensureChapterAudio,
 };
 module.exports.seedDemos = seedDemos;
 module.exports.REQUIRED_VOICES = REQUIRED_VOICES;
 module.exports.ensureVoiceCatalog = ensureVoiceCatalog;
+module.exports.ensureChapterAudio = ensureChapterAudio;
 module.exports.default = seedDemos;
 
 if (require.main === module) {

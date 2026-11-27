@@ -170,6 +170,7 @@ export default function OpenGLPageReader({
   fontFamily = 'serif',
   fontSize = 18,
   isFocusMode = false,
+  hideFocusExitButton = false,
   isFollowingAlong = true,
   onToggleFocusMode,
   onPageChange,
@@ -827,12 +828,12 @@ export default function OpenGLPageReader({
     <div
       className={
         isFocusMode
-          ? 'fixed inset-0 z-50 bg-[var(--bg-page)] flex flex-col justify-between px-3 sm:px-8 pt-3 pb-28 overflow-hidden animate-fade-in select-none w-screen h-screen'
+          ? `fixed inset-0 ${hideFocusExitButton ? 'z-30 pt-14 pb-32' : 'z-50 pt-3 pb-28'} bg-[var(--bg-page)] flex flex-col justify-between px-3 sm:px-8 overflow-hidden animate-fade-in select-none w-screen h-screen`
           : 'w-full flex-1 flex flex-col justify-between items-center animate-fade-in select-none relative overflow-hidden py-2 min-h-0'
       }
     >
       {/* Floating Exit Focus Button */}
-      {isFocusMode && onToggleFocusMode && (
+      {isFocusMode && onToggleFocusMode && !hideFocusExitButton && (
         <div className="fixed top-4 right-6 z-50">
           <button
             type="button"

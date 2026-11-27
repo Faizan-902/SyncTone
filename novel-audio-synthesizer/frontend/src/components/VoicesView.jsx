@@ -24,7 +24,7 @@ export const CANONICAL_NEURAL_VOICES = [
   { id: 'en-US-RogerNeural', label: 'American Mature Male (Roger)', gender: 'Male', role: 'MATURE MALE', timbre: 'Seasoned, resonant American baritone for elder roles' },
   { id: 'en-US-SteffanNeural', label: 'American Young Male (Steffan)', gender: 'Male', role: 'YOUNG MALE', timbre: 'Energetic, clear American young-adult register' },
   { id: 'en-US-MichelleNeural', label: 'American Female (Michelle)', gender: 'Female', role: 'AMERICAN FEMALE', timbre: 'Smooth, composed American voice for dramatic dialogue' },
-  { id: 'en-AU-WilliamNeural', label: 'Australian Male (William)', gender: 'Male', role: 'AUSTRALIAN MALE', timbre: 'Grounded Australian baritone with natural clarity' },
+  { id: 'en-AU-WilliamMultilingualNeural', label: 'Australian Male (William)', gender: 'Male', role: 'AUSTRALIAN MALE', timbre: 'Grounded Australian baritone with natural clarity' },
   { id: 'en-AU-NatashaNeural', label: 'Australian Female (Natasha)', gender: 'Female', role: 'AUSTRALIAN FEMALE', timbre: 'Crisp, expressive Australian voice' },
   { id: 'en-CA-LiamNeural', label: 'Canadian Male (Liam)', gender: 'Male', role: 'CANADIAN MALE', timbre: 'Steady, approachable North American tenor' },
   { id: 'en-CA-ClaraNeural', label: 'Canadian Female (Clara)', gender: 'Female', role: 'CANADIAN FEMALE', timbre: 'Clear, poised Canadian voice' },
@@ -299,12 +299,21 @@ export function useVoiceAudition(engine = null) {
       setLoadingId(targetKey);
 
       let savedEngine = null;
+      let savedTimbre = null;
       try {
         savedEngine = typeof localStorage !== 'undefined' ? localStorage.getItem('synctone_tts_engine') : null;
+        const rawTimbre = typeof localStorage !== 'undefined' ? localStorage.getItem('synctone_timbre_settings') : null;
+        savedTimbre = rawTimbre ? JSON.parse(rawTimbre) : null;
       } catch (_) {}
       const resolvedEngine = engine || savedEngine || 'msedge-tts';
       const sampleText = text || `Testing voice profile for ${speakerName || voiceId}.`;
-      const speakUrl = `/api/voices/speak?text=${encodeURIComponent(sampleText)}&voice_id=${encodeURIComponent(voiceId)}&engine=${encodeURIComponent(resolvedEngine)}&character_id=${encodeURIComponent(characterId || voiceId)}&speaker_name=${encodeURIComponent(speakerName || voiceId)}&is_narrator=${Boolean(isNarrator)}&gender=${encodeURIComponent(String(gender || '').toLowerCase())}`;
+      const pitchParam = Number.isFinite(Number(savedTimbre?.pitchOffset)) && Number(savedTimbre.pitchOffset) !== 0
+        ? `&pitch_st=${encodeURIComponent(String(savedTimbre.pitchOffset))}`
+        : '';
+      const speedParam = Number.isFinite(Number(savedTimbre?.cadenceRate)) && Number(savedTimbre.cadenceRate) !== 1.0
+        ? `&speed=${encodeURIComponent(String(savedTimbre.cadenceRate))}`
+        : '';
+      const speakUrl = `/api/voices/speak?text=${encodeURIComponent(sampleText)}&voice_id=${encodeURIComponent(voiceId)}&engine=${encodeURIComponent(resolvedEngine)}&character_id=${encodeURIComponent(characterId || voiceId)}&speaker_name=${encodeURIComponent(speakerName || voiceId)}&is_narrator=${Boolean(isNarrator)}&explicit_voice=true&gender=${encodeURIComponent(String(gender || '').toLowerCase())}${pitchParam}${speedParam}`;
 
       const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
       abortRef.current = controller;
@@ -506,11 +515,50 @@ export default function VoicesView({
     stopAudition: stopActivePreview,
   } = useVoiceAudition(activeEngine);
 
-  // Timbre sliders state
-  const [emotionalRange, setEmotionalRange] = useState(78);
-  const [breathRate, setBreathRate] = useState(42);
-  const [pitchOffset, setPitchOffset] = useState(0);
-  const [cadenceRate, setCadenceRate] = useState(1.0);
+  // Timbre sliders state (persisted to localStorage and wired into live /api/voices/speak)
+  const [emotionalRange, setEmotionalRange] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('synctone_timbre_settings') || '{}');
+      return Number.isFinite(Number(saved.emotionalRange)) ? Number(saved.emotionalRange) : 78;
+    } catch (_) {
+      return 78;
+    }
+  });
+  const [breathRate, setBreathRate] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('synctone_timbre_settings') || '{}');
+      return Number.isFinite(Number(saved.breathRate)) ? Number(saved.breathRate) : 42;
+    } catch (_) {
+      return 42;
+    }
+  });
+  const [pitchOffset, setPitchOffset] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('synctone_timbre_settings') || '{}');
+      return Number.isFinite(Number(saved.pitchOffset)) ? Number(saved.pitchOffset) : 0;
+    } catch (_) {
+      return 0;
+    }
+  });
+  const [cadenceRate, setCadenceRate] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('synctone_timbre_settings') || '{}');
+      return Number.isFinite(Number(saved.cadenceRate)) ? Number(saved.cadenceRate) : 1.0;
+    } catch (_) {
+      return 1.0;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem(
+          'synctone_timbre_settings',
+          JSON.stringify({ emotionalRange, breathRate, pitchOffset, cadenceRate })
+        );
+      }
+    } catch (_) {}
+  }, [emotionalRange, breathRate, pitchOffset, cadenceRate]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return undefined;

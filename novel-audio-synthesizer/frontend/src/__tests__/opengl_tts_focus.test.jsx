@@ -265,6 +265,21 @@ describe('Subagent 3: OpenGL Reader, WTR-Lab Yellow Highlight & Focus Mode', () 
       expect(handleToggleFocus).toHaveBeenCalledTimes(1);
     });
 
+    it('uses z-30 below ReaderView toolbar/banner and hides duplicate Exit button when hideFocusExitButton is true', () => {
+      const { container } = render(
+        <OpenGLPageReader
+          segments={MOCK_SEGMENTS}
+          activeSegmentId={1}
+          isFocusMode={true}
+          hideFocusExitButton={true}
+          onToggleFocusMode={vi.fn()}
+        />
+      );
+
+      expect(container.firstChild).toHaveClass('fixed', 'inset-0', 'z-30', 'pt-14', 'pb-32');
+      expect(screen.queryByTitle(/Exit Focus Mode/i)).not.toBeInTheDocument();
+    });
+
     it('handles Next and Prev page turns without snapping back or invoking onSegmentClick', () => {
       const handleSegmentClick = vi.fn();
       // 6 segments so we have at least 2 spreads

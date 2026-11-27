@@ -393,6 +393,12 @@ function getSecMsGecToken() {
   }
 }
 
+function normalizeSpeed(speed) {
+  const num = Number(speed);
+  if (!Number.isFinite(num) || num <= 0) return 1.0;
+  return Math.max(0.25, Math.min(3.0, num));
+}
+
 function getPythonBin() {
   const pythonVenv = path.resolve(config.paths.modelsDir, '../.venv/bin/python');
   if (fs.existsSync(pythonVenv)) return pythonVenv;
@@ -495,35 +501,45 @@ class TTSEngine {
         if (!finished) {
           finished = true;
           try {
-            ws.close();
+            ws.terminate();
           } catch (_) {}
           reject(new Error('Edge TTS WebSocket timeout (6s)'));
         }
       }, 6000);
 
       ws.on('open', () => {
-        const configMsg =
-          'Content-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n' +
-          JSON.stringify({
-            context: {
-              synthesis: {
-                audio: {
-                  metadataoptions: {
-                    sentenceBoundaryEnabled: 'false',
-                    wordBoundaryEnabled: 'false',
+        if (finished || ws.readyState !== WebSocket.OPEN) return;
+        try {
+          const configMsg =
+            'Content-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n' +
+            JSON.stringify({
+              context: {
+                synthesis: {
+                  audio: {
+                    metadataoptions: {
+                      sentenceBoundaryEnabled: 'false',
+                      wordBoundaryEnabled: 'false',
+                    },
+                    outputFormat: 'audio-24khz-48kbitrate-mono-mp3',
                   },
-                  outputFormat: 'audio-24khz-48kbitrate-mono-mp3',
                 },
               },
-            },
-          });
-        ws.send(configMsg);
+            });
+          ws.send(configMsg);
 
-        const timestamp = new Date().toUTCString();
-        const requestId = crypto.randomUUID().replace(/-/g, '');
-        const ssml = `<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='en-US'><voice name='${voiceId}'><prosody pitch='${pitch}' rate='${rate}'>${safeText}</prosody></voice></speak>`;
-        const ssmlMsg = `X-RequestId:${requestId}\r\nContent-Type:application/ssml+xml\r\nX-Timestamp:${timestamp}Z\r\nPath:ssml\r\n\r\n${ssml}`;
-        ws.send(ssmlMsg);
+          const timestamp = new Date().toUTCString();
+          const requestId = crypto.randomUUID().replace(/-/g, '');
+          const ssml = `<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='en-US'><voice name='${voiceId}'><prosody pitch='${pitch}' rate='${rate}'>${safeText}</prosody></voice></speak>`;
+          const ssmlMsg = `X-RequestId:${requestId}\r\nContent-Type:application/ssml+xml\r\nX-Timestamp:${timestamp}Z\r\nPath:ssml\r\n\r\n${ssml}`;
+          ws.send(ssmlMsg);
+        } catch (sendErr) {
+          if (!finished) {
+            finished = true;
+            clearTimeout(timeout);
+            try { ws.terminate(); } catch (_) {}
+            reject(sendErr);
+          }
+        }
       });
 
       ws.on('message', (data, isBinary) => {
@@ -720,21 +736,33 @@ class TTSEngine {
   }
 
   async synthesizeWithEdge(text, voiceId, options = {}) {
-    try {
-      return await this.synthesizeWithEdgeWs(text, voiceId, options);
-    } catch (wsErr) {
+    let lastErr = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        return await this.synthesizeWithEdgeNode(text, voiceId, options);
-      } catch (nodeErr) {
-        console.warn(`[TTSEngine] Edge WebSocket/Node failed (${wsErr.message} / ${nodeErr.message}). Trying Edge CLI fallback.`);
-        return await this.synthesizeWithEdgeCli(text, voiceId, options);
+        return await this.synthesizeWithEdgeWs(text, voiceId, options);
+      } catch (wsErr) {
+        lastErr = wsErr;
+        try {
+          return await this.synthesizeWithEdgeNode(text, voiceId, options);
+        } catch (nodeErr) {
+          lastErr = nodeErr;
+          const isRateLimit = /429|503|timeout/i.test(`${wsErr.message} ${nodeErr.message}`);
+          if (attempt === 0 && isRateLimit) {
+            await new Promise((r) => setTimeout(r, 350 + Math.floor(Math.random() * 250)));
+            continue;
+          }
+          console.warn(`[TTSEngine] Edge WebSocket/Node failed (${wsErr.message} / ${nodeErr.message}). Trying Edge CLI fallback.`);
+          return await this.synthesizeWithEdgeCli(text, voiceId, options);
+        }
       }
     }
+    throw lastErr || new Error('Edge TTS failed');
   }
 
   // --- ENGINE 2: Kokoro-TTS (Local ONNX / Acoustic Neural Fallback) ---
   async synthesizeWithKokoro(text, voiceId, speed = 1.0, options = {}) {
-    const trimmed = (text || '').trim();
+    const trimmed = typeof text === 'string' ? text.trim() : String(text || '').trim();
+    speed = normalizeSpeed(speed);
     if (!trimmed) {
       return {
         audio_buffer: Buffer.alloc(0),
@@ -798,7 +826,9 @@ class TTSEngine {
     }
 
     if (options.failHonestly) {
-      throw new Error(`Kokoro-TTS model weights not available or synthesis failed for voice '${voiceId}'`);
+      const err = new Error(`Kokoro-TTS model weights unavailable and cloud bridge failed for voice '${voiceId}'`);
+      err.status = 503;
+      throw err;
     }
 
     // In test mode or when local speech is disabled: clean silent PCM buffer
@@ -825,7 +855,8 @@ class TTSEngine {
 
   // --- ENGINE 3: Machine / Local OS Speech Synthesis (Async non-blocking) ---
   async synthesizeWithMachine(text, voiceId, speed = 1.0, mixContext = {}) {
-    const trimmed = (text || '').trim();
+    const trimmed = typeof text === 'string' ? text.trim() : String(text || '').trim();
+    speed = normalizeSpeed(speed);
     const macVoice = resolveMacVoice(voiceId, mixContext);
     if (!trimmed) {
       return {
@@ -965,7 +996,8 @@ class TTSEngine {
 
   // --- ENGINE 4: Paradee-8M-v1.2 (Local Micro 8.5MB Int8 ONNX via Worker Pool) ---
   async synthesizeWithParadee(text, voiceId, speed = 1.0, mixContext = {}) {
-    const trimmed = (text || '').trim();
+    const trimmed = typeof text === 'string' ? text.trim() : String(text || '').trim();
+    speed = normalizeSpeed(speed);
     const charId = String(
       mixContext.characterId || mixContext.character_id || mixContext.speakerName || mixContext.speaker_name || ''
     ).trim();
@@ -1048,7 +1080,9 @@ class TTSEngine {
 
     // Fallback when Paradee ONNX is unavailable: fail honestly if requested, else delegate to Machine TTS
     if (mixContext.failHonestly) {
-      throw new Error(`Paradee-TTS model weights not available or synthesis failed for voice '${voiceId}'`);
+      const err = new Error(`Paradee-TTS model weights unavailable or synthesis failed for voice '${voiceId}'`);
+      err.status = 503;
+      throw err;
     }
     const fallbackRes = await this.synthesizeWithMachine(trimmed, paradeeVoice, effectiveSpeed, {
       ...mixContext,
@@ -1063,7 +1097,8 @@ class TTSEngine {
 
   // --- ENGINE 5: Mixed Paradee-8M (Primary 4 Cast) + Machine-TTS (5th+ Extra Cast) ---
   async synthesizeWithParadeeMixed(text, voiceId, speed = 1.0, mixContext = {}) {
-    const trimmed = (text || '').trim();
+    const trimmed = typeof text === 'string' ? text.trim() : String(text || '').trim();
+    speed = normalizeSpeed(speed);
     if (!trimmed) {
       return {
         audio_buffer: Buffer.alloc(0),
@@ -1109,7 +1144,8 @@ class TTSEngine {
 
   // --- Public Interface: 5-Engine Architecture (Selectable + Fallback Chain) ---
   async synthesizeSegment(text, voiceId, speed = 1.0, preferredEngine = 'auto', mixContext = {}) {
-    const trimmed = (text || '').trim();
+    const trimmed = typeof text === 'string' ? text.trim() : String(text || '').trim();
+    const safeSpeed = normalizeSpeed(speed);
     if (!trimmed) {
       return {
         audio_buffer: Buffer.alloc(0),
@@ -1129,7 +1165,15 @@ class TTSEngine {
       };
     }
 
-    const engineChoice = (preferredEngine || 'auto').toLowerCase();
+    const rawEngineChoice = String(preferredEngine || 'auto').trim().toLowerCase();
+    const ENGINE_ALIASES = {
+      'edge-tts': 'msedge-tts',
+      msedge: 'msedge-tts',
+      kokoro: 'kokoro-tts',
+      paradee: 'paradee-tts',
+      machine: 'machine-tts',
+    };
+    const engineChoice = ENGINE_ALIASES[rawEngineChoice] || rawEngineChoice;
     const KNOWN_ENGINES = new Set(['msedge-tts', 'kokoro-tts', 'paradee-tts', 'paradee-mixed', 'machine-tts', 'auto']);
     if (!KNOWN_ENGINES.has(engineChoice)) {
       throw new Error(`Unsupported TTS engine '${preferredEngine}'`);
@@ -1188,7 +1232,7 @@ class TTSEngine {
     let useCatalogVoice = false;
     if (isNarrator) {
       catalogEntry = VOICE_CATALOG.narrator;
-      useCatalogVoice = !mixContext.explicitVoice || !rawVoiceId;
+      useCatalogVoice = !mixContext.explicitVoice && (!rawVoiceId || rawVoiceId === 'narrator' || requestedEdgeVoice === narratorDefaultEdge);
     } else if (charCatalogEntry) {
       const catEdge = LEGACY_VOICE_ALIASES[charCatalogEntry.primary] || charCatalogEntry.primary;
       const catFallback = charCatalogEntry.fallback
@@ -1245,9 +1289,9 @@ class TTSEngine {
       };
     }
 
-    let effectiveSpeed = speed || 1.0;
+    let effectiveSpeed = safeSpeed;
     if (baseRatePct !== 0) {
-      effectiveSpeed = Number((effectiveSpeed * (1 + baseRatePct / 100)).toFixed(2));
+      effectiveSpeed = normalizeSpeed(Number((effectiveSpeed * (1 + baseRatePct / 100)).toFixed(2)));
     }
 
     // 1. Explicit Machine TTS
@@ -1280,10 +1324,16 @@ class TTSEngine {
     }
 
     // 5. 'msedge-tts' or 'auto' (Fallback Chain: msedge-tts -> kokoro-tts -> paradee-tts -> machine-tts)
-    if (speed && speed !== 1.0) {
-      const speedPct = Math.round((speed - 1.0) * 100);
-      const totalRate = baseRatePct + speedPct;
+    if (safeSpeed !== 1.0) {
+      const speedPct = Math.round((safeSpeed - 1.0) * 100);
+      const totalRate = Math.max(-45, Math.min(60, baseRatePct + speedPct));
       prosody.rate = `${totalRate >= 0 ? '+' : ''}${totalRate}%`;
+    }
+    const rawPitchSt = Number(mixContext.pitchOffsetSt);
+    if (Number.isFinite(rawPitchSt) && rawPitchSt !== 0) {
+      const clampedPitchSt = Math.max(-6, Math.min(6, rawPitchSt));
+      const totalPitchHz = Math.max(-25, Math.min(25, basePitchNum + Math.round(clampedPitchSt * 3)));
+      prosody.pitch = `${totalPitchHz >= 0 ? '+' : ''}${totalPitchHz}Hz`;
     }
 
     try {

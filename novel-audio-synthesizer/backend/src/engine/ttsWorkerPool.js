@@ -131,6 +131,12 @@ class PersistentWorker {
       req.reject(err || new Error(`[WorkerPool:${this.name}] Worker terminated unexpectedly`));
     }
     this.pending.clear();
+    if (this.rl) {
+      try {
+        this.rl.removeAllListeners();
+        this.rl.close();
+      } catch (_) {}
+    }
     this.process = null;
     this.rl = null;
   }

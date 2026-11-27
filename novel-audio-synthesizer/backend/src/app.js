@@ -63,12 +63,19 @@ function createApp() {
   app.use(express.urlencoded({ extended: true, limit: '250mb' }));
   app.use(cookieParser());
 
-  // Static audio file serving
+  // Static audio & cover file serving (supports both /static/covers and /covers)
+  const coverStaticDirs = [
+    path.join(config.paths.outputDir, 'covers'),
+    path.resolve(__dirname, '../output/covers'),
+    path.resolve(__dirname, '../../frontend/public/covers'),
+  ];
   app.use('/static/audio', express.static(config.paths.outputDir));
-  app.use('/static/covers', express.static(path.join(config.paths.outputDir, 'covers')));
-  app.use('/static/covers', express.static(path.resolve(__dirname, '../output/covers')));
-  app.use('/static/covers', express.static(path.resolve(__dirname, '../../frontend/public/covers')));
-  app.get('/static/covers/:fileName', async (req, res, next) => {
+  for (const dir of coverStaticDirs) {
+    app.use('/static/covers', express.static(dir));
+    app.use('/covers', express.static(dir));
+  }
+
+  const handleCoverFallback = async (req, res, next) => {
     try {
       const safeName = path.basename(req.params.fileName || '');
       if (!safeName) {
@@ -91,7 +98,7 @@ function createApp() {
           return pipeStreamSafe(s3Obj.stream, res);
         }
       }
-      if (process.env.VERCEL) {
+      if (process.env.VERCEL && req.path.startsWith('/static/covers')) {
         return res.redirect(302, `/covers/${encodeURIComponent(safeName)}`);
       }
       return next();
@@ -99,7 +106,9 @@ function createApp() {
       console.warn('[StaticCover Fallback Warning]:', err.message);
       return next();
     }
-  });
+  };
+  app.get('/static/covers/:fileName', handleCoverFallback);
+  app.get('/covers/:fileName', handleCoverFallback);
 
   // Health check endpoint (root & /api alias)
   app.get(['/health', '/api/health'], (_req, res) => {
@@ -122,6 +131,19 @@ function createApp() {
 
   // Global Error Handler
   app.use((err, _req, res, _next) => {
+    if (res.headersSent) {
+      return;
+    }
+    if (err && err.name === 'MulterError') {
+      const status = err.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+      return res.status(status).json({ error: err.message || 'Invalid file upload request.' });
+    }
+    if (err && err.type === 'entity.too.large') {
+      return res.status(413).json({ error: 'Request payload too large.' });
+    }
+    if (err && err.type === 'entity.parse.failed') {
+      return res.status(400).json({ error: 'Malformed JSON request body.' });
+    }
     console.error('[API Error]:', err);
     return res.status(err.status || 500).json({
       error: err.message || 'Internal server error',

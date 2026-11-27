@@ -491,7 +491,7 @@ export default function ReaderView({
     >
       {/* Floating Focus Mode Banner */}
       {isFocusMode && (
-        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 bg-[var(--bg-surface)] text-[var(--text-main)] text-xs px-5 py-2 rounded-full border border-[var(--border-strong)] shadow-2xl flex items-center gap-3 animate-fade-in font-mono">
+        <div className="fixed bottom-[86px] right-4 z-40 bg-[var(--bg-surface)] text-[var(--text-main)] text-xs px-4 py-1.5 rounded-full border border-[var(--border-strong)] shadow-2xl flex items-center gap-3 animate-fade-in font-mono">
           <span className="w-1.5 h-1.5 rounded-full bg-[var(--text-main)]" />
           <span>Focus Mode Active • Press Esc to exit</span>
           <button
@@ -865,6 +865,7 @@ export default function ReaderView({
             fontFamily={fontFamily}
             fontSize={fontSize}
             isFocusMode={isFocusMode}
+            hideFocusExitButton={true}
             isFollowingAlong={isFollowingAlong}
             onToggleFocusMode={() => setIsFocusMode((prev) => !prev)}
             onPageChange={setOpenGlPageInfo}

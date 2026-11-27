@@ -10,29 +10,40 @@ const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 router.post('/playback/progress', optionalAuth, async (req, res) => {
   let client;
   try {
-    const { novel_id, chapter_id, segment_order = 0, position_ms = 0 } = req.body;
+    const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
+    const { novel_id, chapter_id, segment_order = 0, position_ms = 0 } = body;
     // Prevent IDOR: authenticated users always use their own id; admin or unauthenticated caller can pass user_id
     const user_id = (req.user && req.user.role !== 'admin')
       ? req.user.id
-      : (req.body.user_id || req.user?.id);
+      : (body.user_id || req.user?.id);
 
     if (!user_id || !novel_id || !chapter_id) {
       return res.status(400).json({ error: 'user_id, novel_id, and chapter_id are required' });
     }
 
-    if (!UUID_REGEX.test(user_id) || !UUID_REGEX.test(novel_id) || !UUID_REGEX.test(chapter_id)) {
+    if (
+      typeof user_id !== 'string' ||
+      typeof novel_id !== 'string' ||
+      typeof chapter_id !== 'string' ||
+      !UUID_REGEX.test(user_id) ||
+      !UUID_REGEX.test(novel_id) ||
+      !UUID_REGEX.test(chapter_id)
+    ) {
       return res.status(400).json({ error: 'Invalid UUID format for user_id, novel_id, or chapter_id' });
     }
 
     const parsedSegmentOrder = Number(segment_order);
     const parsedPositionMs = Number(position_ms);
+    const MAX_PG_INT = 2147483647;
     if (
       !Number.isInteger(parsedSegmentOrder) ||
       parsedSegmentOrder < 0 ||
+      parsedSegmentOrder > MAX_PG_INT ||
       !Number.isInteger(parsedPositionMs) ||
-      parsedPositionMs < 0
+      parsedPositionMs < 0 ||
+      parsedPositionMs > MAX_PG_INT
     ) {
-      return res.status(400).json({ error: 'segment_order and position_ms must be non-negative integers' });
+      return res.status(400).json({ error: 'segment_order and position_ms must be non-negative 32-bit integers' });
     }
 
     client = await pool.connect();

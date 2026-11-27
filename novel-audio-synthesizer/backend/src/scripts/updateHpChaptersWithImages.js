@@ -15,7 +15,18 @@ async function updateHpChapters() {
   });
   console.log('✔ Connected to PostgreSQL');
 
-  const novelId = '2361aae1-bd74-4e82-b33d-d62ab5fa9e2f';
+  const novelRes = await pool.query(
+    `SELECT id FROM novels
+     WHERE LOWER(title) LIKE '%harry potter%philosopher%'
+        OR LOWER(title) LIKE '%harry potter%sorcerer%'
+     ORDER BY created_at ASC
+     LIMIT 1`
+  );
+  if (novelRes.rows.length === 0) {
+    throw new Error('Harry Potter novel not found in PostgreSQL novels table.');
+  }
+  const novelId = novelRes.rows[0].id;
+  console.log(`✔ Found Harry Potter novel ID: ${novelId}`);
 
   // Find narrator character id
   const charRes = await pool.query(
@@ -25,9 +36,17 @@ async function updateHpChapters() {
   const narratorCharId = charRes.rows[0]?.id || null;
   const narratorVoiceId = charRes.rows[0]?.voice_id || 'en-GB-RyanNeural';
 
-  const jsonPath = path.resolve(__dirname, '../../output/hp1_extracted.json');
-  if (!fs.existsSync(jsonPath)) {
-    throw new Error(`hp1_extracted.json not found at ${jsonPath}`);
+  const candidateJsonPaths = [
+    process.env.HP_EXTRACTED_JSON,
+    path.join(config.paths.outputDir, 'hp1_extracted.json'),
+    path.resolve(__dirname, '../../output/hp1_extracted.json'),
+    path.resolve(__dirname, '../../../output/hp1_extracted.json'),
+    path.resolve(__dirname, '../../../../output/hp1_extracted.json'),
+  ].filter(Boolean);
+
+  const jsonPath = candidateJsonPaths.find((p) => fs.existsSync(p));
+  if (!jsonPath) {
+    throw new Error(`hp1_extracted.json not found. Checked: ${candidateJsonPaths.join(', ')}`);
   }
   const extracted = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
   console.log(`Loaded ${extracted.chapters.length} chapters from ${jsonPath}`);

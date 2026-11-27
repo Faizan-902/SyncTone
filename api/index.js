@@ -29,6 +29,13 @@ async function ensureInitialized() {
 }
 
 module.exports = async (req, res) => {
-  const app = await ensureInitialized();
-  return app(req, res);
+  try {
+    const app = await ensureInitialized();
+    return app(req, res);
+  } catch (err) {
+    console.error('[Vercel Handler Error]:', err);
+    if (!res.headersSent) {
+      return res.status(503).json({ error: 'Service temporarily unavailable.' });
+    }
+  }
 };

@@ -373,10 +373,10 @@ router.post('/auth/register', async (req, res) => {
  */
 router.post('/auth/login', async (req, res) => {
   try {
-    const { email, password } = req.body || {};
+    const { email, password } = req.body && typeof req.body === 'object' ? req.body : {};
 
-    if (!email || !password) {
-      return res.status(400).json({ error: 'Email and password are required.' });
+    if (!email || typeof email !== 'string' || !password || typeof password !== 'string') {
+      return res.status(400).json({ error: 'Valid email and password strings are required.' });
     }
 
     const query = `
@@ -554,7 +554,13 @@ router.post('/auth/passkey/register-verify', optionalAuth, async (req, res) => {
     const { challengeId, credential, response, friendlyName } = req.body || {};
     const attestationResponse = credential || response;
 
-    if (!challengeId || !attestationResponse) {
+    if (
+      typeof challengeId !== 'string' ||
+      !challengeId.trim() ||
+      challengeId.length > 128 ||
+      !attestationResponse ||
+      typeof attestationResponse !== 'object'
+    ) {
       return res.status(400).json({ error: 'challengeId and passkey credential response are required.' });
     }
 
@@ -704,7 +710,14 @@ router.post('/auth/passkey/login-verify', async (req, res) => {
     const { challengeId, credential, response } = req.body || {};
     const assertionResponse = credential || response;
 
-    if (!challengeId || !assertionResponse || !assertionResponse.id) {
+    if (
+      typeof challengeId !== 'string' ||
+      !challengeId.trim() ||
+      challengeId.length > 128 ||
+      !assertionResponse ||
+      typeof assertionResponse !== 'object' ||
+      typeof assertionResponse.id !== 'string'
+    ) {
       return res.status(400).json({ error: 'challengeId and passkey assertion response are required.' });
     }
 
@@ -1222,7 +1235,7 @@ router.get('/auth/oauth/:provider/callback', async (req, res) => {
     }
 
     const meta = chRes.rows[0].metadata || {};
-    const redirectOrigin = meta.baseOrigin || baseOrigin;
+    const redirectOrigin = isSafeReturnOrigin(meta.baseOrigin) ? meta.baseOrigin.replace(/\/$/, '') : baseOrigin;
     const returnTo = meta.returnTo || '/';
     const callbackUrl = meta.callbackUrl || `${redirectOrigin}/api/auth/oauth/${provider}/callback`;
 

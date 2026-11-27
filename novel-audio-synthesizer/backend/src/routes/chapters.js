@@ -857,6 +857,10 @@ async function ingestChapter({ novelId, title, text, chapterNumber, requestedBy 
     client.release();
     clientReleased = true;
 
+    try {
+      require('./novels').invalidateNovelsCache?.();
+    } catch (_) {}
+
     await upsertDiscoveredCharactersPg(pool, novelId, mappedSegments);
 
     persistChapterToDisk(createdPgChapter.id, createdPgChapter.title, text);
@@ -889,7 +893,8 @@ async function ingestChapter({ novelId, title, text, chapterNumber, requestedBy 
 router.post('/novels/:id/chapters', optionalAuth, async (req, res) => {
   try {
     const novelId = req.params.id;
-    const { text, title, chapter_number, requested_by } = req.body;
+    const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
+    const { text, title, chapter_number, requested_by } = body;
 
     if (!novelId || !UUID_REGEX.test(novelId)) {
       return res.status(400).json({ error: 'Invalid novel UUID in route parameter.' });
@@ -897,6 +902,15 @@ router.post('/novels/:id/chapters', optionalAuth, async (req, res) => {
 
     if (!text || typeof text !== 'string' || text.trim().length === 0) {
       return res.status(400).json({ error: 'Missing or empty chapter "text" field.' });
+    }
+
+    let parsedChapterNumber;
+    if (chapter_number !== undefined && chapter_number !== null && chapter_number !== '') {
+      const n = Number(chapter_number);
+      if (!Number.isInteger(n) || n < 0 || n > 2147483647) {
+        return res.status(400).json({ error: 'chapter_number must be a non-negative integer.' });
+      }
+      parsedChapterNumber = n > 0 ? n : undefined;
     }
 
     // Verify novel exists in PostgreSQL before authorization checks
@@ -936,7 +950,7 @@ router.post('/novels/:id/chapters', optionalAuth, async (req, res) => {
       novelId,
       title,
       text,
-      chapterNumber: chapter_number ? parseInt(chapter_number, 10) : undefined,
+      chapterNumber: parsedChapterNumber,
       requestedBy: effectiveRequestedBy,
     });
 
@@ -964,7 +978,8 @@ router.post('/novels/:id/chapters', optionalAuth, async (req, res) => {
  */
 router.post('/upload', optionalAuth, async (req, res) => {
   try {
-    const { text, title = 'Untitled Chapter', novel_id, requested_by } = req.body;
+    const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
+    const { text, title = 'Untitled Chapter', novel_id, requested_by } = body;
 
     if (!text || typeof text !== 'string' || text.trim().length === 0) {
       return res.status(400).json({ error: 'Missing or invalid "text" field' });
@@ -1065,6 +1080,9 @@ router.get('/chapters', async (_req, res) => {
   }
 });
 
+const parsingInFlight = new Map();
+const synthesisInFlight = new Map();
+
 /**
  * 4. POST /api/parse/:chapter_id
  * Reads chapter text from MongoDB, runs parsing & attribution, updates MongoDB & PostgreSQL.
@@ -1080,10 +1098,22 @@ router.post('/parse/:chapter_id', optionalAuth, async (req, res) => {
     return res.status(403).json({ error: "Forbidden: role 'reader' cannot parse chapters." });
   }
 
-  try {
+  if (parsingInFlight.has(chapter_id)) {
+    try {
+      const existingResult = await parsingInFlight.get(chapter_id);
+      if (existingResult.notFound) {
+        return res.status(404).json({ detail: 'Chapter not found in document store.' });
+      }
+      return res.json(existingResult.parsedOutput);
+    } catch (err) {
+      return res.status(500).json({ error: 'Failed to parse chapter.', detail: err.message });
+    }
+  }
+
+  const runParseTask = async () => {
     const chapterDoc = await Chapter.findOne({ pg_chapter_id: chapter_id });
     if (!chapterDoc) {
-      return res.status(404).json({ detail: 'Chapter not found in document store.' });
+      return { notFound: true };
     }
 
     let novelId = chapterDoc.novel_id || null;
@@ -1240,7 +1270,20 @@ router.post('/parse/:chapter_id', optionalAuth, async (req, res) => {
     });
 
     console.log(`[Chapters] Parsed ${chapter_id} (${usedEngine}) with ${mappedSegments.length} segments`);
-    return res.json(parsedOutput);
+    return { notFound: false, parsedOutput };
+  };
+
+  const taskPromise = runParseTask().finally(() => {
+    parsingInFlight.delete(chapter_id);
+  });
+  parsingInFlight.set(chapter_id, taskPromise);
+
+  try {
+    const outcome = await taskPromise;
+    if (outcome.notFound) {
+      return res.status(404).json({ detail: 'Chapter not found in document store.' });
+    }
+    return res.json(outcome.parsedOutput);
   } catch (err) {
     console.error('[Parse Chapter Error]:', err.message);
     broadcastProgress(chapter_id, { status: 'failed', error: err.message });
@@ -1265,319 +1308,384 @@ router.post('/synthesize/:chapter_id', optionalAuth, async (req, res) => {
     return res.status(400).json({ error: 'Invalid chapter UUID format.' });
   }
 
-  try {
-    const chapterDoc = await Chapter.findOne({ pg_chapter_id: chapter_id });
-    if (!chapterDoc) {
-      return res.status(404).json({ detail: 'Chapter not found in document store.' });
-    }
+  const preferredEngine = String(req.body?.engine || req.query?.engine || 'auto').trim() || 'auto';
+  const normalizedEngineKey = preferredEngine.toLowerCase();
 
-    if (!chapterDoc.segments || chapterDoc.segments.length === 0) {
-      return res.status(400).json({ detail: 'Chapter not yet parsed. Call /parse first.' });
+  while (synthesisInFlight.has(chapter_id)) {
+    const active = synthesisInFlight.get(chapter_id);
+    if (active.engineKey === normalizedEngineKey) {
+      const outcome = await active.promise;
+      if (outcome.errorStatus) {
+        return res.status(outcome.errorStatus).json(outcome.errorBody);
+      }
+      return res.json(outcome.manifest);
     }
+    await active.promise.catch(() => {});
+  }
 
-    // Mark as processing in PostgreSQL
+  const runSynthesisTask = async () => {
     try {
-      await pool.query(
-        "UPDATE chapters SET status = 'processing', updated_at = now() WHERE id = $1",
-        [chapter_id]
-      );
-      await pool.query(
-        `UPDATE synthesis_jobs SET status = 'processing'
-         WHERE id IN (SELECT job_id FROM chapter_synthesis_job_targets WHERE chapter_id = $1)`,
-        [chapter_id]
-      );
-    } catch (dbErr) {
-      console.warn('[Synthesize] DB status update warning:', dbErr.message);
-    }
-
-    const total = chapterDoc.segments.length;
-    const segmentAudios = [];
-
-    const activeAssignments = voiceProfiler.getAllAssignments();
-    const preferredEngine = req.body?.engine || req.query?.engine || 'auto';
-    const { buildMixedCastPlan } = require('../engine/mixedVoiceRouter');
-
-    let novelCharacters = [];
-    if (chapterDoc.novel_id) {
-      try {
-        const charRes = await pool.query(
-          'SELECT id, novel_id, canonical_name AS name, canonical_name, gender, voice_id, is_narrator FROM characters WHERE novel_id = $1',
-          [chapterDoc.novel_id]
-        );
-        if (charRes?.rows?.length > 0) {
-          novelCharacters = charRes.rows;
-        }
-      } catch (_) {}
-    }
-
-    const castPlan =
-      String(preferredEngine).toLowerCase() === 'paradee-mixed'
-        ? buildMixedCastPlan(chapterDoc.segments, novelCharacters)
-        : null;
-
-    const enginesUsedSet = new Set();
-
-    for (let i = 0; i < total; i++) {
-      const seg = chapterDoc.segments[i];
-      const effectiveVoiceId = activeAssignments[seg.character_id] || seg.voice_id;
-      const isImageSeg = seg.type === 'image' || (seg.text && seg.text.startsWith('[IMAGE:'));
-
-      broadcastProgress(chapter_id, {
-        chapter_id,
-        current_segment: i + 1,
-        total_segments: total,
-        percent_complete: Math.round(((i + 1) / total) * 90),
-        status: 'synthesizing',
-      });
-
-      if (isImageSeg) {
-        continue;
+      const chapterDoc = await Chapter.findOne({ pg_chapter_id: chapter_id });
+      if (!chapterDoc) {
+        return { errorStatus: 404, errorBody: { detail: 'Chapter not found in document store.' } };
       }
 
-      let result;
-      if (!/[a-zA-Z0-9]/.test(seg.text || '')) {
-        const silentSamples = Math.floor((ttsEngine.sampleRate || 24000) * 0.2);
-        result = {
-          audio_buffer: Buffer.alloc(silentSamples * 2),
-          duration_ms: 200,
-          format: 'pcm',
-          engine: preferredEngine === 'auto' ? 'msedge-tts' : preferredEngine,
-          resolved_voice_id: effectiveVoiceId,
-        };
-      } else {
+      if (!chapterDoc.segments || chapterDoc.segments.length === 0) {
+        return { errorStatus: 400, errorBody: { detail: 'Chapter not yet parsed. Call /parse first.' } };
+      }
+
+      // Mark as processing in PostgreSQL (supports both 'processing' and legacy 'synthesizing' check constraints)
+      try {
         try {
-          result = await ttsEngine.synthesizeSegment(
-            seg.text,
-            effectiveVoiceId,
-            1.0,
-            preferredEngine,
-            {
-              characterId: seg.character_id || seg.speaker_id || '',
-              speakerName: seg.speaker_name || '',
-              isNarrator: seg.type === 'narration' || String(seg.character_id || '').toLowerCase() === 'narrator',
-              castPlan,
-            }
+          await pool.query(
+            "UPDATE chapters SET status = 'processing', updated_at = now() WHERE id = $1",
+            [chapter_id]
           );
-        } catch (segErr) {
-          console.warn(`[Synthesize Segment Fallback] Segment ${i + 1} failed (${segErr.message}); falling back to Machine/silence.`);
+        } catch (chStatusErr) {
+          if (chStatusErr.code === '23514') {
+            await pool.query(
+              "UPDATE chapters SET status = 'synthesizing', updated_at = now() WHERE id = $1",
+              [chapter_id]
+            );
+          } else {
+            throw chStatusErr;
+          }
+        }
+        await pool.query(
+          `UPDATE synthesis_jobs SET status = 'processing'
+           WHERE id IN (SELECT job_id FROM chapter_synthesis_job_targets WHERE chapter_id = $1)`,
+          [chapter_id]
+        );
+      } catch (dbErr) {
+        console.warn('[Synthesize] DB status update warning:', dbErr.message);
+      }
+
+      const total = chapterDoc.segments.length;
+      const segmentAudios = [];
+
+      const activeAssignments = voiceProfiler.getAllAssignments();
+      const { buildMixedCastPlan } = require('../engine/mixedVoiceRouter');
+
+      let novelCharacters = [];
+      if (chapterDoc.novel_id) {
+        try {
+          const charRes = await pool.query(
+            'SELECT id, novel_id, canonical_name AS name, canonical_name, gender, voice_id, is_narrator FROM characters WHERE novel_id = $1',
+            [chapterDoc.novel_id]
+          );
+          if (charRes?.rows?.length > 0) {
+            novelCharacters = charRes.rows;
+          }
+        } catch (_) {}
+      }
+
+      const castPlan =
+        normalizedEngineKey === 'paradee-mixed'
+          ? buildMixedCastPlan(chapterDoc.segments, novelCharacters)
+          : null;
+
+      const charVoiceLookup = new Map();
+      for (const c of novelCharacters) {
+        if (!c?.voice_id) continue;
+        const candidates = [c.id, c.canonical_name, c.name];
+        if (c.is_narrator) candidates.push('narrator');
+        for (const k of candidates) {
+          if (k) charVoiceLookup.set(String(k).trim().toLowerCase(), c.voice_id);
+        }
+      }
+
+      const enginesUsedSet = new Set();
+
+      for (let i = 0; i < total; i++) {
+        const seg = chapterDoc.segments[i];
+        const segCharKey = String(seg.character_id || seg.speaker_id || '').trim().toLowerCase();
+        const segSpeakerKey = String(seg.speaker_name || '').trim().toLowerCase();
+        const isNarrSeg = seg.type === 'narration' || segCharKey === 'narrator';
+        const effectiveVoiceId =
+          charVoiceLookup.get(segCharKey) ||
+          charVoiceLookup.get(segSpeakerKey) ||
+          (isNarrSeg ? charVoiceLookup.get('narrator') : null) ||
+          activeAssignments[seg.character_id] ||
+          activeAssignments[segCharKey] ||
+          seg.assigned_voice_id ||
+          seg.voice_id;
+        const isImageSeg = seg.type === 'image' || (seg.text && seg.text.startsWith('[IMAGE:'));
+
+        broadcastProgress(chapter_id, {
+          chapter_id,
+          current_segment: i + 1,
+          total_segments: total,
+          percent_complete: Math.round(((i + 1) / total) * 90),
+          status: 'synthesizing',
+        });
+
+        if (isImageSeg) {
+          continue;
+        }
+
+        let result;
+        if (!/[a-zA-Z0-9]/.test(seg.text || '')) {
+          const silentSamples = Math.floor((ttsEngine.sampleRate || 24000) * 0.2);
+          result = {
+            audio_buffer: Buffer.alloc(silentSamples * 2),
+            duration_ms: 200,
+            format: 'pcm',
+            engine: preferredEngine === 'auto' ? 'msedge-tts' : preferredEngine,
+            resolved_voice_id: effectiveVoiceId,
+          };
+        } else {
           try {
-            result = await ttsEngine.synthesizeWithMachine(
+            result = await ttsEngine.synthesizeSegment(
               seg.text,
               effectiveVoiceId,
               1.0,
+              preferredEngine,
               {
                 characterId: seg.character_id || seg.speaker_id || '',
                 speakerName: seg.speaker_name || '',
-                isNarrator: seg.type === 'narration' || String(seg.character_id || '').toLowerCase() === 'narrator',
+                isNarrator: isNarrSeg,
+                explicitVoice: Boolean(effectiveVoiceId && effectiveVoiceId !== 'en-GB-RyanNeural'),
+                castPlan,
               }
             );
-          } catch (_) {
-            const silentSamples = Math.floor((ttsEngine.sampleRate || 24000) * 0.25);
-            result = {
-              audio_buffer: Buffer.alloc(silentSamples * 2),
-              duration_ms: 250,
-              format: 'pcm',
-              engine: 'machine-tts',
-              resolved_voice_id: effectiveVoiceId,
-            };
-          }
-        }
-      }
-
-      const rawBuf = result.audio_buffer || result.pcm_buffer;
-      const fmt = result.format || 'mp3';
-      const validation = validateAudioBuffer(rawBuf, fmt);
-      const isValidBuf = typeof validation === 'object' && validation !== null ? validation.valid : Boolean(validation);
-      if (!isValidBuf) {
-        throw new Error(`Invalid synthesized audio buffer for segment ${i + 1}`);
-      }
-
-      const actualEngine = result.engine || (preferredEngine === 'auto' ? 'msedge-tts' : preferredEngine);
-      enginesUsedSet.add(actualEngine);
-      if (result.sub_engine) {
-        enginesUsedSet.add(result.sub_engine);
-      }
-
-      const resolvedVoice = result.resolved_voice_id || result.voice_id || effectiveVoiceId;
-
-      segmentAudios.push({
-        segment_id: seg.order,
-        order: seg.order,
-        text: seg.text,
-        voice_id: resolvedVoice,
-        resolved_voice_id: resolvedVoice,
-        speaker_name: seg.speaker_name || seg.character_id,
-        character_id: seg.character_id,
-        audio_buffer: result.audio_buffer || result.pcm_buffer,
-        pcm_buffer: result.pcm_buffer || result.audio_buffer,
-        duration_ms: result.duration_ms,
-        format: result.format || 'mp3',
-        engine: actualEngine,
-      });
-    }
-
-    broadcastProgress(chapter_id, {
-      chapter_id,
-      current_segment: total,
-      total_segments: total,
-      percent_complete: 95,
-      status: 'stitching',
-    });
-
-    const manifest = audioStitcher.stitch(segmentAudios, chapter_id);
-
-    const enginesUsedList = Array.from(enginesUsedSet);
-    if (enginesUsedList.length === 0) {
-      enginesUsedList.push(preferredEngine);
-    }
-
-    manifest.engine = preferredEngine;
-    manifest.studio_engine = preferredEngine;
-    manifest.engines_used = enginesUsedList;
-
-    manifest.timeline = manifest.timeline.map((t, idx) => {
-      const segAudio = segmentAudios[idx];
-      const resolvedVoice = segAudio?.resolved_voice_id || segAudio?.voice_id || t.voice_id;
-      return {
-        ...t,
-        voice_id: resolvedVoice,
-        resolved_voice_id: resolvedVoice,
-      };
-    });
-
-    // Save manifest in MongoDB with engine, studio_engine, engines_used, and resolved_voice_id
-    chapterDoc.manifest = {
-      total_duration_ms: manifest.total_duration_ms,
-      audio_url: manifest.audio_url || `${chapter_id}.${manifest.audio_format || 'mp3'}`,
-      engine: preferredEngine,
-      studio_engine: preferredEngine,
-      engines_used: enginesUsedList,
-      timeline: manifest.timeline.map((t) => ({
-        order: t.order || 0,
-        segment_id: t.segment_id || t.order || 0,
-        start_ms: t.start_ms,
-        end_ms: t.end_ms,
-        character_id: t.character_id || t.speaker_name,
-        voice_id: t.voice_id,
-        resolved_voice_id: t.resolved_voice_id || t.voice_id,
-        text: t.text || '',
-        type: t.type || 'narration',
-        image_url: t.image_url || null,
-      })),
-    };
-    chapterDoc.set('manifest.engine', preferredEngine, { strict: false });
-    chapterDoc.set('manifest.studio_engine', preferredEngine, { strict: false });
-    chapterDoc.set('manifest.engines_used', enginesUsedList, { strict: false });
-    await chapterDoc.save();
-
-    const swiftAudioObject = `${chapter_id}.${manifest.audio_format || 'mp3'}`;
-    const audioFilePath = path.join(config.paths.outputDir, swiftAudioObject);
-
-    // Upload synthesized audio to S3-compatible bucket (Supabase / B2 / R2) or OpenStack Swift
-    if (fs.existsSync(audioFilePath)) {
-      const contentType = swiftAudioObject.endsWith('.mp3')
-        ? 'audio/mpeg'
-        : swiftAudioObject.endsWith('.opus')
-          ? 'audio/opus'
-          : 'audio/wav';
-      if (storageService.isS3Configured()) {
-        try {
-          const audioData = fs.readFileSync(audioFilePath);
-          await storageService.putObject({
-            bucketType: 'audio',
-            key: swiftAudioObject,
-            body: audioData,
-            contentType,
-          });
-        } catch (s3Err) {
-          console.warn('[Synthesize S3 Upload Warning]: Failed uploading chapter audio to bucket:', s3Err.message);
-        }
-      } else {
-        try {
-          if (getSwiftAuth) {
-            const { token, storageUrl } = await getSwiftAuth();
-            if (token && storageUrl) {
-              const audioData = fs.readFileSync(audioFilePath);
-              const axios = require('axios');
-              await axios.put(
-                `${storageUrl}/${config.swift.containerAudio}/${swiftAudioObject}`,
-                audioData,
+          } catch (segErr) {
+            console.warn(`[Synthesize Segment Fallback] Segment ${i + 1} failed (${segErr.message}); falling back to Machine/silence.`);
+            try {
+              result = await ttsEngine.synthesizeWithMachine(
+                seg.text,
+                effectiveVoiceId,
+                1.0,
                 {
-                  headers: {
-                    'X-Auth-Token': token,
-                    'Content-Type': contentType,
-                  },
-                  timeout: 5000,
+                  characterId: seg.character_id || seg.speaker_id || '',
+                  speakerName: seg.speaker_name || '',
+                  isNarrator: seg.type === 'narration' || String(seg.character_id || '').toLowerCase() === 'narrator',
                 }
               );
+            } catch (_) {
+              const silentSamples = Math.floor((ttsEngine.sampleRate || 24000) * 0.25);
+              result = {
+                audio_buffer: Buffer.alloc(silentSamples * 2),
+                duration_ms: 250,
+                format: 'pcm',
+                engine: 'machine-tts',
+                resolved_voice_id: effectiveVoiceId,
+              };
             }
           }
-        } catch (swiftErr) {
-          console.warn('[Synthesize Swift Upload Warning]: Swift offline or upload failed, continuing locally:', swiftErr.message);
+        }
+
+        const rawBuf = result.audio_buffer || result.pcm_buffer;
+        const fmt = result.format || 'mp3';
+        const validation = validateAudioBuffer(rawBuf, fmt);
+        const isValidBuf = typeof validation === 'object' && validation !== null ? validation.valid : Boolean(validation);
+        if (!isValidBuf) {
+          throw new Error(`Invalid synthesized audio buffer for segment ${i + 1}`);
+        }
+
+        const actualEngine = result.engine || (preferredEngine === 'auto' ? 'msedge-tts' : preferredEngine);
+        enginesUsedSet.add(actualEngine);
+        if (result.sub_engine) {
+          enginesUsedSet.add(result.sub_engine);
+        }
+
+        const resolvedVoice = result.resolved_voice_id || result.voice_id || effectiveVoiceId;
+
+        segmentAudios.push({
+          segment_id: seg.order,
+          order: seg.order,
+          text: seg.text,
+          voice_id: resolvedVoice,
+          resolved_voice_id: resolvedVoice,
+          speaker_name: seg.speaker_name || seg.character_id,
+          character_id: seg.character_id,
+          audio_buffer: result.audio_buffer || result.pcm_buffer,
+          pcm_buffer: result.pcm_buffer || result.audio_buffer,
+          duration_ms: result.duration_ms,
+          format: result.format || 'mp3',
+          engine: actualEngine,
+        });
+      }
+
+      broadcastProgress(chapter_id, {
+        chapter_id,
+        current_segment: total,
+        total_segments: total,
+        percent_complete: 95,
+        status: 'stitching',
+      });
+
+      const manifest = audioStitcher.stitch(segmentAudios, chapter_id);
+
+      const enginesUsedList = Array.from(enginesUsedSet);
+      if (enginesUsedList.length === 0) {
+        enginesUsedList.push(preferredEngine);
+      }
+
+      manifest.engine = preferredEngine;
+      manifest.studio_engine = preferredEngine;
+      manifest.engines_used = enginesUsedList;
+
+      manifest.timeline = manifest.timeline.map((t, idx) => {
+        const segAudio = segmentAudios[idx];
+        const resolvedVoice = segAudio?.resolved_voice_id || segAudio?.voice_id || t.voice_id;
+        return {
+          ...t,
+          voice_id: resolvedVoice,
+          resolved_voice_id: resolvedVoice,
+        };
+      });
+
+      // Save manifest in MongoDB with engine, studio_engine, engines_used, and resolved_voice_id
+      chapterDoc.manifest = {
+        total_duration_ms: manifest.total_duration_ms,
+        audio_url: manifest.audio_url || `${chapter_id}.${manifest.audio_format || 'mp3'}`,
+        engine: preferredEngine,
+        studio_engine: preferredEngine,
+        engines_used: enginesUsedList,
+        timeline: manifest.timeline.map((t) => ({
+          order: t.order || 0,
+          segment_id: t.segment_id || t.order || 0,
+          start_ms: t.start_ms,
+          end_ms: t.end_ms,
+          character_id: t.character_id || t.speaker_name,
+          voice_id: t.voice_id,
+          resolved_voice_id: t.resolved_voice_id || t.voice_id,
+          text: t.text || '',
+          type: t.type || 'narration',
+          image_url: t.image_url || null,
+        })),
+      };
+      chapterDoc.set('manifest.engine', preferredEngine, { strict: false });
+      chapterDoc.set('manifest.studio_engine', preferredEngine, { strict: false });
+      chapterDoc.set('manifest.engines_used', enginesUsedList, { strict: false });
+      await chapterDoc.save();
+
+      const swiftAudioObject = `${chapter_id}.${manifest.audio_format || 'mp3'}`;
+      const audioFilePath = path.join(config.paths.outputDir, swiftAudioObject);
+
+      // Upload synthesized audio to S3-compatible bucket (Supabase / B2 / R2) or OpenStack Swift
+      if (fs.existsSync(audioFilePath)) {
+        const contentType = swiftAudioObject.endsWith('.mp3')
+          ? 'audio/mpeg'
+          : swiftAudioObject.endsWith('.opus')
+            ? 'audio/opus'
+            : 'audio/wav';
+        if (storageService.isS3Configured()) {
+          try {
+            const audioData = fs.readFileSync(audioFilePath);
+            await storageService.putObject({
+              bucketType: 'audio',
+              key: swiftAudioObject,
+              body: audioData,
+              contentType,
+            });
+          } catch (s3Err) {
+            console.warn('[Synthesize S3 Upload Warning]: Failed uploading chapter audio to bucket:', s3Err.message);
+          }
+        } else {
+          try {
+            if (getSwiftAuth) {
+              const { token, storageUrl } = await getSwiftAuth();
+              if (token && storageUrl) {
+                const audioData = fs.readFileSync(audioFilePath);
+                const axios = require('axios');
+                await axios.put(
+                  `${storageUrl}/${config.swift.containerAudio}/${swiftAudioObject}`,
+                  audioData,
+                  {
+                    headers: {
+                      'X-Auth-Token': token,
+                      'Content-Type': contentType,
+                    },
+                    timeout: 5000,
+                  }
+                );
+              }
+            }
+          } catch (swiftErr) {
+            console.warn('[Synthesize Swift Upload Warning]: Swift offline or upload failed, continuing locally:', swiftErr.message);
+          }
         }
       }
-    }
 
-    // Update PostgreSQL chapters table
-    await pool.query(
-      `
-      UPDATE chapters 
-      SET status = 'completed', total_duration_ms = $1, swift_audio_object = $2, updated_at = now() 
-      WHERE id = $3;
-    `,
-      [manifest.total_duration_ms, swiftAudioObject, chapter_id]
-    );
-    invalidatePersistedAudioCache(chapter_id);
-
-    // Update PostgreSQL synthesis_jobs queue via target relation
-    await pool.query(
-      `
-      UPDATE synthesis_jobs 
-      SET status = 'completed', progress_pct = 1.0, completed_at = now() 
-      WHERE id IN (
-        SELECT job_id FROM chapter_synthesis_job_targets WHERE chapter_id = $1
-      );
-    `,
-      [chapter_id]
-    );
-
-    const chapterDir = path.join(config.paths.chaptersDir, chapter_id);
-    if (!fs.existsSync(chapterDir)) fs.mkdirSync(chapterDir, { recursive: true });
-    fs.writeFileSync(path.join(chapterDir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf-8');
-
-    broadcastProgress(chapter_id, {
-      chapter_id,
-      current_segment: total,
-      total_segments: total,
-      percent_complete: 100,
-      status: 'complete',
-    });
-
-    console.log(`[Chapters] Synthesized ${chapter_id} (${manifest.total_duration_ms}ms, format: ${manifest.audio_format})`);
-    manifest.audio_stream_url = manifest.audio_url || manifest.audio_stream_url || '';
-    return res.json(manifest);
-  } catch (err) {
-    console.error('[Synthesize Chapter Error]:', err.message);
-    try {
+      // Update PostgreSQL chapters table
       await pool.query(
-        "UPDATE chapters SET status = 'failed', updated_at = now() WHERE id = $1",
+        `
+        UPDATE chapters 
+        SET status = 'completed', total_duration_ms = $1, swift_audio_object = $2, updated_at = now() 
+        WHERE id = $3;
+      `,
+        [manifest.total_duration_ms, swiftAudioObject, chapter_id]
+      );
+      invalidatePersistedAudioCache(chapter_id);
+      try {
+        require('./novels').invalidateNovelsCache?.();
+      } catch (_) {}
+
+      // Update PostgreSQL synthesis_jobs queue via target relation
+      await pool.query(
+        `
+        UPDATE synthesis_jobs 
+        SET status = 'completed', progress_pct = 1.0, completed_at = now() 
+        WHERE id IN (
+          SELECT job_id FROM chapter_synthesis_job_targets WHERE chapter_id = $1
+        );
+      `,
         [chapter_id]
       );
-      await pool.query(
-        `UPDATE synthesis_jobs SET status = 'failed', error_message = $1, completed_at = now()
-         WHERE id IN (SELECT job_id FROM chapter_synthesis_job_targets WHERE chapter_id = $2)`,
-        [err.message || 'Synthesis failed', chapter_id]
-      );
-    } catch (_dbErr) {}
-    broadcastProgress(chapter_id, {
-      chapter_id,
-      current_segment: null,
-      total_segments: null,
-      status: 'failed',
-      error: 'Chapter synthesis encountered an unexpected error. Please retry.',
-    });
-    return res.status(500).json({ error: 'Failed to synthesize chapter.', detail: err.message });
+
+      const chapterDir = path.join(config.paths.chaptersDir, chapter_id);
+      if (!fs.existsSync(chapterDir)) fs.mkdirSync(chapterDir, { recursive: true });
+      fs.writeFileSync(path.join(chapterDir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf-8');
+
+      broadcastProgress(chapter_id, {
+        chapter_id,
+        current_segment: total,
+        total_segments: total,
+        percent_complete: 100,
+        status: 'complete',
+      });
+
+      console.log(`[Chapters] Synthesized ${chapter_id} (${manifest.total_duration_ms}ms, format: ${manifest.audio_format})`);
+      manifest.audio_stream_url = manifest.audio_url || manifest.audio_stream_url || '';
+      return { manifest };
+    } catch (err) {
+      console.error('[Synthesize Chapter Error]:', err.message);
+      try {
+        await pool.query(
+          "UPDATE chapters SET status = 'failed', updated_at = now() WHERE id = $1",
+          [chapter_id]
+        );
+        await pool.query(
+          `UPDATE synthesis_jobs SET status = 'failed', error_message = $1, completed_at = now()
+           WHERE id IN (SELECT job_id FROM chapter_synthesis_job_targets WHERE chapter_id = $2)`,
+          [err.message || 'Synthesis failed', chapter_id]
+        );
+      } catch (_dbErr) {}
+      broadcastProgress(chapter_id, {
+        chapter_id,
+        current_segment: null,
+        total_segments: null,
+        status: 'failed',
+        error: 'Chapter synthesis encountered an unexpected error. Please retry.',
+      });
+      return { errorStatus: 500, errorBody: { error: 'Failed to synthesize chapter.', detail: err.message } };
+    }
+  };
+
+  const taskPromise = runSynthesisTask().finally(() => {
+    const current = synthesisInFlight.get(chapter_id);
+    if (current && current.promise === taskPromise) {
+      synthesisInFlight.delete(chapter_id);
+    }
+  });
+  synthesisInFlight.set(chapter_id, { engineKey: normalizedEngineKey, promise: taskPromise });
+
+  const outcome = await taskPromise;
+  if (outcome.errorStatus) {
+    return res.status(outcome.errorStatus).json(outcome.errorBody);
   }
+  return res.json(outcome.manifest);
 });
 
 /**
@@ -1699,56 +1807,66 @@ router.all('/stream/:chapter_id', async (req, res, next) => {
     return res.status(404).json({ detail: 'Audio file not found' });
   }
 
-  const isMp3 = audioPath === audioPathMp3;
-  const stat = fs.statSync(audioPath);
-  const fileSize = stat.size;
-  const range = req.headers.range;
-  const contentType = isMp3 ? 'audio/mpeg' : 'audio/wav';
+  try {
+    const isMp3 = audioPath === audioPathMp3;
+    const stat = fs.statSync(audioPath);
+    const fileSize = stat.size;
+    if (fileSize <= 0) {
+      return res.status(404).json({ detail: 'Audio file not found' });
+    }
+    const range = req.headers.range;
+    const contentType = isMp3 ? 'audio/mpeg' : 'audio/wav';
 
-  const defaultHeaders = {
-    'Content-Type': contentType,
-    'Accept-Ranges': 'bytes',
-    'Cache-Control': 'public, max-age=86400',
-  };
-  if (studioEngine) {
-    defaultHeaders['X-Studio-Engine'] = studioEngine;
-    defaultHeaders['X-TTS-Engine'] = studioEngine;
-  }
+    const defaultHeaders = {
+      'Content-Type': contentType,
+      'Accept-Ranges': 'bytes',
+      'Cache-Control': 'public, max-age=86400',
+    };
+    if (studioEngine) {
+      defaultHeaders['X-Studio-Engine'] = studioEngine;
+      defaultHeaders['X-TTS-Engine'] = studioEngine;
+    }
 
-  if (req.method === 'HEAD') {
-    res.writeHead(200, {
-      ...defaultHeaders,
-      'Content-Length': fileSize,
-    });
-    return res.end();
-  }
-
-  if (range) {
-    const parsedRange = parseByteRange(range, fileSize);
-    if (!parsedRange || parsedRange.invalid) {
-      res.writeHead(416, {
-        'Content-Range': `bytes */${fileSize}`,
+    if (req.method === 'HEAD') {
+      res.writeHead(200, {
         ...defaultHeaders,
+        'Content-Length': fileSize,
       });
       return res.end();
     }
 
-    const { start, end } = parsedRange;
-    const chunksize = end - start + 1;
+    if (range) {
+      const parsedRange = parseByteRange(range, fileSize);
+      if (!parsedRange || parsedRange.invalid) {
+        res.writeHead(416, {
+          'Content-Range': `bytes */${fileSize}`,
+          ...defaultHeaders,
+        });
+        return res.end();
+      }
 
-    const file = fs.createReadStream(audioPath, { start, end });
-    res.writeHead(206, {
-      'Content-Range': `bytes ${start}-${end}/${fileSize}`,
-      'Content-Length': chunksize,
-      ...defaultHeaders,
-    });
-    pipeStreamSafe(file, res);
-  } else {
-    res.writeHead(200, {
-      'Content-Length': fileSize,
-      ...defaultHeaders,
-    });
-    pipeStreamSafe(fs.createReadStream(audioPath), res);
+      const { start, end } = parsedRange;
+      const chunksize = end - start + 1;
+
+      const file = fs.createReadStream(audioPath, { start, end });
+      res.writeHead(206, {
+        'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+        'Content-Length': chunksize,
+        ...defaultHeaders,
+      });
+      pipeStreamSafe(file, res);
+    } else {
+      res.writeHead(200, {
+        'Content-Length': fileSize,
+        ...defaultHeaders,
+      });
+      pipeStreamSafe(fs.createReadStream(audioPath), res);
+    }
+  } catch (err) {
+    console.warn('[Stream Local File Warning]:', err.message);
+    if (!res.headersSent) {
+      return res.status(404).json({ detail: 'Audio file not found' });
+    }
   }
 });
 
@@ -1758,6 +1876,9 @@ router.all('/stream/:chapter_id', async (req, res, next) => {
  */
 router.get('/chapters/:id/progress/sse', (req, res) => {
   const { id } = req.params;
+  if (!id || !SAFE_ID_REGEX.test(id)) {
+    return res.status(400).json({ error: 'Invalid chapter ID format.' });
+  }
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -1769,18 +1890,32 @@ router.get('/chapters/:id/progress/sse', (req, res) => {
 
   eventDispatcher.addSseClient(id, res);
 
-  const heartbeat = setInterval(() => {
+  let cleaned = false;
+  let heartbeat;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    clearInterval(heartbeat);
+    eventDispatcher.removeSseClient(id, res);
+  };
+
+  heartbeat = setInterval(() => {
+    if (res.destroyed || res.writableEnded) {
+      cleanup();
+      return;
+    }
     try {
       res.write(': ping\n\n');
     } catch (_) {
-      clearInterval(heartbeat);
+      cleanup();
     }
   }, 15000);
+  if (typeof heartbeat.unref === 'function') {
+    heartbeat.unref();
+  }
 
-  req.on('close', () => {
-    clearInterval(heartbeat);
-    eventDispatcher.removeSseClient(id, res);
-  });
+  req.once('close', cleanup);
+  res.once('close', cleanup);
 });
 
 /**
@@ -1789,6 +1924,9 @@ router.get('/chapters/:id/progress/sse', (req, res) => {
  */
 router.get('/chapters/:id/progress', async (req, res) => {
   const { id } = req.params;
+  if (!id || !SAFE_ID_REGEX.test(id)) {
+    return res.status(400).json({ error: 'Invalid chapter ID format.' });
+  }
   try {
     const cached = eventDispatcher.getLatest(id);
     if (cached) {
@@ -2027,6 +2165,9 @@ router.get('/chapters/:id/track-status', async (req, res) => {
  */
 router.get('/chapters/:id/segments', async (req, res) => {
   const { id } = req.params;
+  if (!id || !SAFE_ID_REGEX.test(id)) {
+    return res.status(400).json({ error: 'Invalid chapter ID format.' });
+  }
   try {
     const chapterDoc = await Chapter.findOne({ pg_chapter_id: id });
     if (chapterDoc && needsSelfHealingReparse(chapterDoc)) {
@@ -2122,6 +2263,9 @@ router.get('/manifest/:chapter_id', async (req, res) => {
  */
 router.get('/characters/:chapter_id', async (req, res) => {
   const { chapter_id } = req.params;
+  if (!chapter_id || !SAFE_ID_REGEX.test(chapter_id)) {
+    return res.status(400).json({ error: 'Invalid chapter ID format.' });
+  }
 
   try {
     const chapterDoc = await Chapter.findOne({ pg_chapter_id: chapter_id });

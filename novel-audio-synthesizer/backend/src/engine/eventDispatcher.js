@@ -146,9 +146,10 @@ class SynthesisEventDispatcher extends EventEmitter {
     const id = String(chapterId || event.chapter_id || '');
     const status = normalizeStatus(event.status);
 
-    const percentComplete = typeof event.percent_complete === 'number'
+    const rawPercent = typeof event.percent_complete === 'number'
       ? event.percent_complete
       : Number(event.progress_pct || 0);
+    const percentComplete = Number.isFinite(rawPercent) ? rawPercent : 0;
 
     const payload = {
       chapter_id: id,
@@ -198,6 +199,10 @@ class SynthesisEventDispatcher extends EventEmitter {
     const sseSet = this.sseClients.get(id);
     if (sseSet) {
       for (const res of sseSet) {
+        if (res.destroyed || res.writableEnded) {
+          sseSet.delete(res);
+          continue;
+        }
         try {
           res.write(`data: ${json}\n\n`);
         } catch (_err) {
