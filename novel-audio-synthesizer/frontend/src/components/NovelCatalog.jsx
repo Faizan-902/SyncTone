@@ -197,6 +197,7 @@ export default function NovelCatalog({
 
   // Netflix & Amazon Prime style automatic billboard rotation state
   const [featuredIndex, setFeaturedIndex] = useState(0);
+  const safeFeaturedIndex = novels.length > 0 ? featuredIndex % novels.length : 0;
   const [slideDirection, setSlideDirection] = useState('forward');
   const [isBillboardPaused, setIsBillboardPaused] = useState(false);
   const [libraryViewMode, setLibraryViewMode] = useState(() => {
@@ -229,9 +230,9 @@ export default function NovelCatalog({
   }, [novels.length]);
 
   const handleJumpToSlide = useCallback((targetIndex) => {
-    setSlideDirection(targetIndex >= featuredIndex ? 'forward' : 'backward');
+    setSlideDirection(targetIndex >= safeFeaturedIndex ? 'forward' : 'backward');
     setFeaturedIndex(targetIndex);
-  }, [featuredIndex]);
+  }, [safeFeaturedIndex]);
 
   // Touch gesture support for mobile/trackpad swiping
   const touchStartXRef = useRef(null);
@@ -304,11 +305,11 @@ export default function NovelCatalog({
     return () => clearInterval(timer);
   }, [debouncedSearch, isBillboardPaused, novels.length, featuredIndex]);
 
-  // Featured Hero Novel (cycles automatically through novels)
+  // Featured Hero Novel (cycles automatically across all novels in active channel)
   const featuredNovel = useMemo(() => {
     if (novels.length === 0) return null;
-    return novels[featuredIndex % novels.length] || novels[0];
-  }, [novels, featuredIndex]);
+    return novels[safeFeaturedIndex] || novels[0];
+  }, [novels, safeFeaturedIndex]);
 
   const featuredInfo = useMemo(() => {
     return getNovelCanonicalInfo(featuredNovel?.title);
@@ -414,7 +415,7 @@ export default function NovelCatalog({
                 <div className="mb-4 flex items-center gap-2 flex-wrap">
                   <span className="inline-flex items-center gap-2 px-3 py-1 text-[11px] font-mono tracking-wider uppercase border border-[var(--border-strong)] bg-[var(--bg-card)] text-[var(--text-main)] rounded-full shadow-xs">
                     <span className="w-1.5 h-1.5 rounded-full bg-current" />
-                    <span>FEATURED VOLUME // VOL. {String(featuredIndex + 1).padStart(2, '0')} — {featuredNovel.title.toUpperCase()}</span>
+                    <span>FEATURED VOLUME // VOL. {String(safeFeaturedIndex + 1).padStart(2, '0')} — {featuredNovel.title.toUpperCase()}</span>
                   </span>
                   {isBillboardPaused && (
                     <span className="text-[11px] font-mono text-[var(--text-sub)] uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-[var(--bg-surface)] border border-[var(--border-subtle)]">
@@ -431,15 +432,15 @@ export default function NovelCatalog({
                   </h1>
                 </div>
 
-                {/* Hero Triad Grid: Left Credits, Center 3D Book, Right Sans Blurb */}
-                <div
-                  key={`hero-stage-${featuredNovel.id || featuredIndex}`}
-                  className={`grid grid-cols-1 md:grid-cols-3 gap-8 lg:gap-12 items-center w-full mb-8 ${
-                    slideDirection === 'backward' ? 'hero-swipe-backward' : 'hero-swipe-forward'
-                  }`}
-                >
+                {/* Hero Triad Grid: Left Credits, Center Persistent 3D Book, Right Sans Blurb */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-8 lg:gap-12 items-center w-full mb-8">
                   {/* Left Column: Mono Metadata Credits ("AT A GLANCE") */}
-                  <div key={`credits-${featuredNovel.id || featuredIndex}`} className="hero-content-crossfade border-l border-[var(--border-strong)] pl-5 flex flex-col gap-3 font-mono">
+                  <div
+                    key={`credits-${featuredNovel.id || safeFeaturedIndex}`}
+                    className={`hero-content-crossfade ${
+                      slideDirection === 'backward' ? 'hero-swipe-backward' : 'hero-swipe-forward'
+                    } border-l border-[var(--border-strong)] pl-5 flex flex-col gap-3 font-mono`}
+                  >
                     <div className="flex flex-col gap-0.5">
                       <span className="text-[11px] text-[var(--text-sub)] tracking-wider">FEATURED TITLE</span>
                       <span
@@ -482,11 +483,10 @@ export default function NovelCatalog({
                     </div>
                   </div>
 
-                  {/* Center Column: Genuine 3D Physical Book Showcase (Hover on book pauses timer) */}
+                  {/* Center Column: Persistent 3D Physical Book Showcase (Hover on book pauses timer) */}
                   <div
-                    key={`stage-${featuredNovel.id || featuredIndex}`}
                     data-testid="featured-book-stage"
-                    className="hero-cover-crossfade flex justify-center items-center py-2 tilted-cover-stage cursor-grab"
+                    className="flex justify-center items-center py-2 tilted-cover-stage cursor-grab"
                     onMouseEnter={() => setIsBillboardPaused(true)}
                     onMouseLeave={() => setIsBillboardPaused(false)}
                     onPointerEnter={() => setIsBillboardPaused(true)}
@@ -494,14 +494,19 @@ export default function NovelCatalog({
                   >
                     <FeaturedBook3D
                       novel={featuredNovel}
-                      volumeIndex={featuredIndex}
+                      volumeIndex={safeFeaturedIndex}
                       onSelectNovel={onSelectNovel}
                       isPaused={isBillboardPaused}
                     />
                   </div>
 
                   {/* Right Column: Editorial Sans Blurb & CTA Scrim Box */}
-                  <div key={`blurb-${featuredNovel.id || featuredIndex}`} className="hero-content-crossfade flex flex-col gap-4">
+                  <div
+                    key={`blurb-${featuredNovel.id || safeFeaturedIndex}`}
+                    className={`hero-content-crossfade ${
+                      slideDirection === 'backward' ? 'hero-swipe-backward' : 'hero-swipe-forward'
+                    } flex flex-col gap-4`}
+                  >
                     <p className="font-sans text-sm sm:text-base leading-relaxed text-[var(--text-main)]">
                       {featuredNovel.synopsis ||
                         'SyncTone re-engineers classic literature into neural multi-speaker drama. Every sentence is dynamically assigned to character voices, scored with generative ambient soundscapes, and synchronized to the reading canvas in real time.'}
@@ -540,10 +545,10 @@ export default function NovelCatalog({
 
                 {/* Minimal Numbered Counters & Arrows with 5s Netflix/Prime Progress Bars */}
                 {novels.length > 1 && (
-                  <div className="flex items-center justify-between pt-4 border-t border-[var(--border-subtle)] font-mono text-xs">
-                    <div className="flex items-center gap-3 sm:gap-4 overflow-x-auto py-1">
-                      {novels.slice(0, 5).map((novelItem, idx) => {
-                        const isActive = idx === (featuredIndex % Math.min(novels.length, 5));
+                  <div className="flex items-center justify-between gap-4 pt-4 border-t border-[var(--border-subtle)] font-mono text-xs">
+                    <div className="flex items-center gap-2.5 sm:gap-3 overflow-x-auto py-1 scrollbar-none min-w-0">
+                      {novels.map((novelItem, idx) => {
+                        const isActive = idx === safeFeaturedIndex;
                         const numStr = String(idx + 1).padStart(2, '0');
                         return (
                           <button
@@ -551,17 +556,23 @@ export default function NovelCatalog({
                             type="button"
                             onClick={() => handleJumpToSlide(idx)}
                             aria-label={`Jump to slide ${idx + 1}: ${novelItem.title}`}
-                            className={`flex items-center gap-2 cursor-pointer transition-colors group ${
+                            aria-current={isActive ? 'true' : undefined}
+                            title={novelItem.title}
+                            className={`flex items-center gap-1.5 cursor-pointer transition-colors group flex-shrink-0 ${
                               isActive
                                 ? 'text-[var(--text-main)] font-bold'
                                 : 'text-[var(--text-muted)] hover:text-[var(--text-main)]'
                             }`}
                           >
                             <span>{numStr}</span>
-                            <div className="w-8 sm:w-12 h-0.5 sm:h-1 bg-[var(--border-strong)] rounded-full overflow-hidden relative">
+                            <div
+                              className={`h-0.5 sm:h-1 bg-[var(--border-strong)] rounded-full overflow-hidden relative transition-all ${
+                                isActive ? 'w-9 sm:w-12' : 'w-4 sm:w-6'
+                              }`}
+                            >
                               {isActive ? (
                                 <div
-                                  key={`progress-${featuredIndex}`}
+                                  key={`progress-${safeFeaturedIndex}`}
                                   className={`h-full bg-[var(--text-main)] rounded-full billboard-progress-fill ${
                                     isBillboardPaused ? 'paused' : ''
                                   }`}
@@ -576,6 +587,9 @@ export default function NovelCatalog({
                     </div>
 
                     <div className="flex items-center gap-2 flex-shrink-0">
+                      <span className="hidden sm:inline text-[11px] font-mono text-[var(--text-sub)] mr-1 tabular-nums">
+                        {String(safeFeaturedIndex + 1).padStart(2, '0')} / {String(novels.length).padStart(2, '0')}
+                      </span>
                       <button
                         type="button"
                         onClick={handlePrevSlide}

@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import NovelCover from '../NovelCover';
 import {
   IconChevronLeft,
@@ -26,8 +26,17 @@ export default function BookShelf3D({
   const [selectedNovelId, setSelectedNovelId] = useState(null);
   const [hoveredNovelId, setHoveredNovelId] = useState(null);
   const shelfScrollRef = useRef(null);
+  const spineRefs = useRef({});
 
-  const selectedNovel = novels.find((n) => n.id === selectedNovelId) || null;
+  const selectedIndex = novels.findIndex((n) => n.id === selectedNovelId);
+  const selectedNovel = selectedIndex >= 0 ? novels[selectedIndex] : null;
+
+  // Clear stale selection if active novel is filtered out
+  useEffect(() => {
+    if (selectedNovelId && selectedIndex === -1) {
+      setSelectedNovelId(null);
+    }
+  }, [selectedNovelId, selectedIndex]);
 
   const scrollShelf = (direction) => {
     if (shelfScrollRef.current) {
@@ -46,17 +55,40 @@ export default function BookShelf3D({
     }
   };
 
-  // Keyboard shortcut: Press Escape to close pulled-forward book inspector
+  const handleCycleVolume = useCallback(
+    (direction) => {
+      if (novels.length === 0) return;
+      const baseIdx = selectedIndex >= 0 ? selectedIndex : 0;
+      const nextIdx = (baseIdx + direction + novels.length) % novels.length;
+      const nextNovel = novels[nextIdx];
+      if (!nextNovel) return;
+      setSelectedNovelId(nextNovel.id);
+      spineRefs.current[nextNovel.id]?.scrollIntoView?.({
+        behavior: 'smooth',
+        inline: 'center',
+        block: 'nearest',
+      });
+    },
+    [novels, selectedIndex]
+  );
+
+  // Keyboard shortcuts: Escape closes inspector; ArrowLeft/ArrowRight cycles volumes when open
   useEffect(() => {
     if (!selectedNovelId) return;
     const handleKeyDown = (e) => {
       if (e.key === 'Escape') {
         setSelectedNovelId(null);
+      } else if (e.key === 'ArrowRight' && novels.length > 1) {
+        e.preventDefault();
+        handleCycleVolume(1);
+      } else if (e.key === 'ArrowLeft' && novels.length > 1) {
+        e.preventDefault();
+        handleCycleVolume(-1);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedNovelId]);
+  }, [selectedNovelId, novels.length, handleCycleVolume]);
 
   return (
     <div className="w-full relative flex flex-col space-y-6 animate-fade-in select-none">
@@ -68,7 +100,7 @@ export default function BookShelf3D({
             // INTERACTIVE PHYSICAL BOOKSHELF
           </span>
           <span className="text-[11px] font-mono text-[var(--text-muted)] hidden sm:inline">
-            • Click any volume spine to pull forward
+            • Click any volume spine to pull forward ({novels.length} {novels.length === 1 ? 'volume' : 'volumes'})
           </span>
         </div>
 
@@ -125,6 +157,13 @@ export default function BookShelf3D({
             return (
               <div
                 key={novel.id}
+                ref={(el) => {
+                  if (el) {
+                    spineRefs.current[novel.id] = el;
+                  } else {
+                    delete spineRefs.current[novel.id];
+                  }
+                }}
                 onClick={() => handleBookClick(novel)}
                 onMouseEnter={() => setHoveredNovelId(novel.id)}
                 onMouseLeave={() => setHoveredNovelId(null)}
@@ -142,6 +181,7 @@ export default function BookShelf3D({
                 }}
                 role="button"
                 tabIndex={0}
+                aria-pressed={isSelected}
                 aria-label={`Physical Book Spine: ${novel.title} by ${novel.author_username || 'Author'}`}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' || e.key === ' ') {
@@ -152,12 +192,14 @@ export default function BookShelf3D({
               >
                 {/* 3D Physical Spine Body */}
                 <div
-                  className="w-full h-full rounded-t-sm rounded-b-xs relative overflow-hidden flex flex-col justify-between py-3 px-1 border-t border-r border-l shadow-xl"
+                  className={`w-full h-full rounded-t-sm rounded-b-xs relative overflow-hidden flex flex-col justify-between py-3 px-1 border-t border-r border-l shadow-xl ${
+                    isSelected ? 'ring-2 ring-[#C5A059] ring-offset-1 ring-offset-black/60' : ''
+                  }`}
                   style={{
                     backgroundColor: palette.bg,
-                    borderColor: palette.border,
+                    borderColor: isSelected ? palette.foil : palette.border,
                     boxShadow: isSelected
-                      ? '-12px 16px 28px rgba(0, 0, 0, 0.85), inset 2px 0 6px rgba(255, 255, 255, 0.15)'
+                      ? '-12px 16px 28px rgba(0, 0, 0, 0.85), inset 2px 0 6px rgba(255, 255, 255, 0.2), 0 0 18px rgba(197, 160, 89, 0.25)'
                       : '-6px 10px 18px rgba(0, 0, 0, 0.65), inset 2px 0 4px rgba(255, 255, 255, 0.08)',
                   }}
                 >
@@ -183,9 +225,9 @@ export default function BookShelf3D({
                   </div>
 
                   {/* Vertical Novel Title */}
-                  <div className="relative z-10 flex-1 flex items-center justify-center my-2">
+                  <div className="relative z-10 flex-1 flex items-center justify-center my-2 min-h-0 overflow-hidden">
                     <span
-                      className="font-sans font-bold text-xs uppercase tracking-widest truncate max-h-[170px]"
+                      className="font-sans font-bold text-xs uppercase tracking-widest max-h-[168px] overflow-hidden text-ellipsis whitespace-nowrap"
                       style={{
                         writingMode: 'vertical-rl',
                         textOrientation: 'mixed',
@@ -267,8 +309,8 @@ export default function BookShelf3D({
                   coverUrl={selectedNovel.cover_object}
                   title={selectedNovel.title}
                   author={selectedNovel.author_username || 'Author'}
-                  genre={selectedNovel.global_tone}
-                  size="md"
+                  id={selectedNovel.id}
+                  index={selectedIndex}
                   className="w-full h-full"
                 />
               </div>
@@ -276,7 +318,7 @@ export default function BookShelf3D({
               <div className="absolute top-0 left-0 bottom-0 w-3 bg-gradient-to-r from-white/30 via-white/10 to-transparent pointer-events-none" />
             </div>
             <span className="text-[10px] font-mono text-[var(--text-muted)] mt-2 uppercase tracking-wider">
-              Selected Volume
+              Vol. {String(selectedIndex + 1).padStart(2, '0')} of {String(novels.length).padStart(2, '0')}
             </span>
           </div>
 
@@ -319,6 +361,29 @@ export default function BookShelf3D({
                 <span>Read Novel</span>
               </button>
 
+              {novels.length > 1 && (
+                <div className="inline-flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => handleCycleVolume(-1)}
+                    aria-label="Previous shelf volume"
+                    className="boxed-btn p-2 rounded-full text-[var(--text-sub)] hover:text-[var(--text-main)] transition cursor-pointer"
+                    title="Previous volume (←)"
+                  >
+                    <IconChevronLeft className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleCycleVolume(1)}
+                    aria-label="Next shelf volume"
+                    className="boxed-btn p-2 rounded-full text-[var(--text-sub)] hover:text-[var(--text-main)] transition cursor-pointer"
+                    title="Next volume (→)"
+                  >
+                    <IconChevronRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
+
               <button
                 type="button"
                 onClick={() => setSelectedNovelId(null)}
@@ -333,4 +398,3 @@ export default function BookShelf3D({
     </div>
   );
 }
-

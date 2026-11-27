@@ -1,8 +1,11 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import * as THREE from 'three';
+import { resolveMediaUrl } from '../../services/api';
+import NovelCover from '../NovelCover';
 import {
   createPageEdgeTexture,
   createSpineTexture,
+  createFrontCoverTexture,
   createBackCoverTexture,
 } from './bookTextures';
 
@@ -15,27 +18,38 @@ function createContactShadowTexture() {
   canvas.width = 256;
   canvas.height = 256;
   const ctx = canvas.getContext('2d');
+  if (ctx) {
+    const grad = ctx.createRadialGradient(128, 128, 10, 128, 128, 120);
+    grad.addColorStop(0, 'rgba(0, 0, 0, 0.75)');
+    grad.addColorStop(0.35, 'rgba(0, 0, 0, 0.45)');
+    grad.addColorStop(0.7, 'rgba(0, 0, 0, 0.15)');
+    grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
 
-  const grad = ctx.createRadialGradient(128, 128, 10, 128, 128, 120);
-  grad.addColorStop(0, 'rgba(0, 0, 0, 0.75)');
-  grad.addColorStop(0.35, 'rgba(0, 0, 0, 0.45)');
-  grad.addColorStop(0.7, 'rgba(0, 0, 0, 0.15)');
-  grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
-
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, 256, 256);
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, 256, 256);
+  }
 
   const texture = new THREE.CanvasTexture(canvas);
   texture.needsUpdate = true;
   return texture;
 }
 
+function replaceMaterialMap(material, nextTexture) {
+  if (!material) return;
+  const previousMap = material.map;
+  material.map = nextTexture;
+  material.needsUpdate = true;
+  if (previousMap && previousMap !== nextTexture) {
+    previousMap.dispose();
+  }
+}
+
 /**
  * FeaturedBook3D Component
  * Genuine WebGL 3D physical hardcover book model powered by Three.js.
- * Features realistic cover texture, visible curved spine with gold foil accents,
- * layered page block thickness, soft floor shadow, ambient/specular lighting,
- * smooth idle floating, and interactive pointer drag rotation.
+ * Features realistic cover texture (with typographic hardcover fallback), visible curved spine
+ * with gold foil accents, layered page block thickness, soft floor shadow, ambient/specular
+ * lighting, smooth idle floating, and interactive pointer drag rotation.
  */
 export default function FeaturedBook3D({
   novel,
@@ -55,6 +69,7 @@ export default function FeaturedBook3D({
   const bookMeshRef = useRef(null);
   const shadowMeshRef = useRef(null);
   const animFrameIdRef = useRef(null);
+  const lastBookKeyRef = useRef(null);
 
   // Interaction tracking
   const pointerPosRef = useRef({ x: 0, y: 0, targetX: 0, targetY: 0 });
@@ -101,7 +116,7 @@ export default function FeaturedBook3D({
         powerPreference: 'high-performance',
       });
       renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-      renderer.setSize(container.clientWidth, container.clientHeight, false);
+      renderer.setSize(container.clientWidth || 320, container.clientHeight || 420, false);
       renderer.outputColorSpace = THREE.SRGBColorSpace;
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
       renderer.toneMappingExposure = 1.08;
@@ -115,12 +130,11 @@ export default function FeaturedBook3D({
     const scene = new THREE.Scene();
     sceneRef.current = scene;
 
-    const camera = new THREE.PerspectiveCamera(
-      34,
-      container.clientWidth / container.clientHeight,
-      0.1,
-      50
-    );
+    const initialAspect =
+      container.clientWidth > 0 && container.clientHeight > 0
+        ? container.clientWidth / container.clientHeight
+        : 320 / 420;
+    const camera = new THREE.PerspectiveCamera(34, initialAspect, 0.1, 50);
     camera.position.set(0, 0.1, 6.3);
 
     // =========================================================================
@@ -142,7 +156,7 @@ export default function FeaturedBook3D({
     scene.add(rimLight);
 
     // =========================================================================
-    // Book Geometry & Materials
+    // Book Geometry & Materials (novel-specific maps are populated below)
     // =========================================================================
     // Hardcover proportions: Width: 2.15, Height: 3.12, Thickness: 0.38
     const bookGeometry = new THREE.BoxGeometry(2.15, 3.12, 0.38);
@@ -154,39 +168,27 @@ export default function FeaturedBook3D({
       metalness: 0.02,
     });
 
-    const spineTexture = createSpineTexture(novel, volumeIndex + 1);
     const spineMaterial = new THREE.MeshStandardMaterial({
-      map: spineTexture,
       roughness: 0.42,
       metalness: 0.15,
     });
 
-    const backCoverTexture = createBackCoverTexture(novel);
     const backCoverMaterial = new THREE.MeshStandardMaterial({
-      map: backCoverTexture,
       roughness: 0.45,
       metalness: 0.12,
     });
 
-    // Front cover texture loaded from novel.cover_object (distinct fallback texture so disposal never aliases spine)
-    const textureLoader = new THREE.TextureLoader();
-    const frontCoverTexture = novel?.cover_object
-      ? textureLoader.load(novel.cover_object)
-      : createSpineTexture(novel, volumeIndex + 1);
-    frontCoverTexture.colorSpace = THREE.SRGBColorSpace;
-
     const frontCoverMaterial = new THREE.MeshStandardMaterial({
-      map: frontCoverTexture,
       roughness: 0.32,
       metalness: 0.08,
     });
 
     // Material array: [+X (pages), -X (spine), +Y (top pages), -Y (bottom pages), +Z (front), -Z (back)]
     const materials = [
-      pageEdgeMaterial, // +X: Right page block
-      spineMaterial,    // -X: Left book spine
-      pageEdgeMaterial, // +Y: Top page block
-      pageEdgeMaterial, // -Y: Bottom page block
+      pageEdgeMaterial,   // +X: Right page block
+      spineMaterial,      // -X: Left book spine
+      pageEdgeMaterial,   // +Y: Top page block
+      pageEdgeMaterial,   // -Y: Bottom page block
       frontCoverMaterial, // +Z: Front cover
       backCoverMaterial,  // -Z: Back cover
     ];
@@ -217,14 +219,14 @@ export default function FeaturedBook3D({
     // =========================================================================
     // Render & Animation Loop
     // =========================================================================
-    let clock = new THREE.Clock();
+    const clock = new THREE.Clock();
 
     const animate = () => {
       animFrameIdRef.current = requestAnimationFrame(animate);
 
       if (!isVisibleRef.current) return;
 
-      const delta = clock.getDelta();
+      clock.getDelta();
       const elapsedTime = clock.getElapsedTime();
 
       // Check reduced motion
@@ -301,7 +303,8 @@ export default function FeaturedBook3D({
 
       // Memory Cleanup & WebGL Resource Deallocation
       bookGeometry.dispose();
-      materials.forEach((m) => {
+      const uniqueMaterials = new Set(materials);
+      uniqueMaterials.forEach((m) => {
         if (m.map) m.map.dispose();
         m.dispose();
       });
@@ -309,71 +312,76 @@ export default function FeaturedBook3D({
       shadowTex.dispose();
       shadowMat.dispose();
       renderer.dispose();
+      bookMeshRef.current = null;
+      lastBookKeyRef.current = null;
     };
   }, []);
 
-  // Update Cover, Spine and Back Materials when novel or volume changes
+  // Populate & update Cover, Spine and Back Materials on mount and whenever novel or volume changes
   useEffect(() => {
-    if (!bookMeshRef.current || !novel) return;
+    if (!bookMeshRef.current) return;
 
     const materials = bookMeshRef.current.material;
     if (!Array.isArray(materials)) return;
 
-    // Cinematic flip transition effect: briefly rotate book to highlight the new volume
-    if (bookMeshRef.current) {
+    const nextBookKey = `${novel?.id ?? 'default'}:${volumeIndex}`;
+    if (lastBookKeyRef.current !== null && lastBookKeyRef.current !== nextBookKey) {
+      // Cinematic flip transition effect when switching between volumes
       bookMeshRef.current.rotation.y += 0.25;
     }
+    lastBookKeyRef.current = nextBookKey;
 
     let cancelled = false;
 
-    // Load new front cover texture
-    const textureLoader = new THREE.TextureLoader();
-    if (novel?.cover_object) {
-      textureLoader.load(novel.cover_object, (texture) => {
-        if (cancelled) {
-          texture.dispose();
-          return;
-        }
-        texture.colorSpace = THREE.SRGBColorSpace;
-        if (materials[4]) {
-          if (materials[4].map && materials[4].map !== materials[1]?.map) {
-            materials[4].map.dispose();
-          }
-          materials[4].map = texture;
-          materials[4].needsUpdate = true;
-        }
-      });
-    } else if (materials[4]) {
-      const fallbackFront = createSpineTexture(novel, volumeIndex + 1);
-      fallbackFront.colorSpace = THREE.SRGBColorSpace;
-      if (materials[4].map && materials[4].map !== materials[1]?.map) {
-        materials[4].map.dispose();
-      }
-      materials[4].map = fallbackFront;
-      materials[4].needsUpdate = true;
-    }
-
-    // Re-generate spine and back cover textures with current novel metadata
+    // Apply spine and back cover textures
     const spineTexture = createSpineTexture(novel, volumeIndex + 1);
-    if (materials[1]) {
-      if (materials[1].map && materials[1].map !== materials[4]?.map) {
-        materials[1].map.dispose();
-      }
-      materials[1].map = spineTexture;
-      materials[1].needsUpdate = true;
-    }
+    replaceMaterialMap(materials[1], spineTexture);
 
     const backTexture = createBackCoverTexture(novel);
-    if (materials[5]) {
-      if (materials[5].map) materials[5].map.dispose();
-      materials[5].map = backTexture;
-      materials[5].needsUpdate = true;
+    replaceMaterialMap(materials[5], backTexture);
+
+    // Always immediately apply typographic front cover fallback so front face never
+    // stretches the spine texture, shows a stale previous cover, or goes blank on error.
+    const fallbackFront = createFrontCoverTexture(novel, volumeIndex + 1);
+    replaceMaterialMap(materials[4], fallbackFront);
+
+    // Upgrade front cover asynchronously when novel.cover_object loads cleanly
+    const resolvedCoverUrl = resolveMediaUrl(novel?.cover_object);
+    if (resolvedCoverUrl) {
+      const textureLoader = new THREE.TextureLoader();
+      if (/^https?:/i.test(resolvedCoverUrl)) {
+        textureLoader.setCrossOrigin('anonymous');
+      }
+      textureLoader.load(
+        resolvedCoverUrl,
+        (loadedTexture) => {
+          if (cancelled) {
+            loadedTexture.dispose();
+            return;
+          }
+          loadedTexture.colorSpace = THREE.SRGBColorSpace;
+          replaceMaterialMap(materials[4], loadedTexture);
+        },
+        undefined,
+        () => {
+          // Load error handled gracefully: typographic createFrontCoverTexture stays active
+        }
+      );
     }
 
     return () => {
       cancelled = true;
     };
-  }, [novel?.id, volumeIndex]);
+  }, [
+    novel?.id,
+    novel?.cover_object,
+    novel?.title,
+    novel?.author_username,
+    novel?.global_tone,
+    novel?.narrator_name,
+    novel?.synopsis,
+    volumeIndex,
+  ]);
 
   // Pointer Parallax (mousemove over stage)
   const handlePointerMove = useCallback((e) => {
@@ -457,17 +465,14 @@ export default function FeaturedBook3D({
         className={`relative w-52 sm:w-60 lg:w-64 aspect-[2/3] tilted-cover cursor-pointer group rounded-xl overflow-hidden shadow-2xl ${className}`}
         title={novel?.title}
       >
-        {novel?.cover_object ? (
-          <img
-            src={novel.cover_object}
-            alt={novel?.title || 'Book cover'}
-            className="w-full h-full object-cover rounded-xl"
-          />
-        ) : (
-          <div className="w-full h-full flex items-center justify-center p-4 text-center bg-neutral-900 text-neutral-100 font-serif">
-            {novel?.title || 'Untitled Volume'}
-          </div>
-        )}
+        <NovelCover
+          title={novel?.title || 'Untitled Volume'}
+          author={novel?.author_username}
+          coverUrl={novel?.cover_object}
+          id={novel?.id}
+          index={volumeIndex}
+          className="w-full h-full rounded-xl"
+        />
       </div>
     );
   }
