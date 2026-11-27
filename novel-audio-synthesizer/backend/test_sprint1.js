@@ -411,10 +411,14 @@ async function runTests() {
 
   // 5.1 Ingestion failure case: Malformed / empty text
   try {
-    await axios.post(`${BASE_URL}/novels/${createdNovel.id}/chapters`, {
-      title: 'Invalid Chapter',
-      text: '',
-    });
+    await axios.post(
+      `${BASE_URL}/novels/${createdNovel.id}/chapters`,
+      {
+        title: 'Invalid Chapter',
+        text: '',
+      },
+      { headers: { Cookie: writerTokenCookie } }
+    );
     throw new Error('Expected empty text to fail');
   } catch (err) {
     if (err.response?.status !== 400) throw new Error(`Expected 400, got ${err.response?.status}`);
@@ -423,23 +427,30 @@ async function runTests() {
 
   // 5.2 Ingestion failure case: Non-existent novel ID
   try {
-    await axios.post(`${BASE_URL}/novels/00000000-0000-0000-0000-000000000000/chapters`, {
-      title: 'Invalid Novel Chapter',
-      text: 'Some sample text',
-    });
+    await axios.post(
+      `${BASE_URL}/novels/00000000-0000-0000-0000-000000000000/chapters`,
+      {
+        title: 'Invalid Novel Chapter',
+        text: 'Some sample text',
+      },
+      { headers: { Cookie: writerTokenCookie } }
+    );
     throw new Error('Expected invalid novel ID to fail');
   } catch (err) {
     if (err.response?.status !== 404) throw new Error(`Expected 404, got ${err.response?.status}`);
     console.log('  ✔ Ingestion to non-existent novel rejected with 404 Not Found');
   }
 
-  // 5.3 Valid Ingestion
-  const ingestRes = await axios.post(`${BASE_URL}/novels/${createdNovel.id}/chapters`, {
-    title: 'Chapter 1: Mr. Sherlock Holmes',
-    text: chapterText,
-    chapter_number: 1,
-    requested_by: writerUser.id,
-  });
+  // 5.3 Valid Ingestion (authenticated owner writer)
+  const ingestRes = await axios.post(
+    `${BASE_URL}/novels/${createdNovel.id}/chapters`,
+    {
+      title: 'Chapter 1: Mr. Sherlock Holmes',
+      text: chapterText,
+      chapter_number: 1,
+    },
+    { headers: { Cookie: writerTokenCookie } }
+  );
   if (ingestRes.status !== 201) throw new Error('Ingestion failed');
   const ingestedChapterId = ingestRes.data.chapter_id;
 
@@ -460,12 +471,15 @@ async function runTests() {
 
   // 5.4 Unique constraint / failure rollback test (Section 12: No silent partial state)
   try {
-    await axios.post(`${BASE_URL}/novels/${createdNovel.id}/chapters`, {
-      title: 'Duplicate Chapter 1',
-      text: 'Duplicate chapter prose',
-      chapter_number: 1, // Violates UNIQUE(novel_id, chapter_number)
-      requested_by: writerUser.id,
-    });
+    await axios.post(
+      `${BASE_URL}/novels/${createdNovel.id}/chapters`,
+      {
+        title: 'Duplicate Chapter 1',
+        text: 'Duplicate chapter prose',
+        chapter_number: 1, // Violates UNIQUE(novel_id, chapter_number)
+      },
+      { headers: { Cookie: writerTokenCookie } }
+    );
     throw new Error('Expected duplicate chapter number to fail');
   } catch (err) {
     if (err.response?.status !== 409) throw new Error(`Expected 409, got ${err.response?.status}`);
@@ -478,24 +492,33 @@ async function runTests() {
   // 5.4b Concurrent chapter ingestion test (Audit Fix 2: serialized auto-numbering via FOR UPDATE)
   console.log('  ▶ Testing concurrent chapter ingestion with omitted chapter_number...');
   const concurrentUploads = [
-    axios.post(`${BASE_URL}/novels/${createdNovel.id}/chapters`, {
-      title: 'Auto Chapter A',
-      text: 'Text for concurrent auto chapter A...',
-      requested_by: writerUser.id,
-      // chapter_number intentionally omitted
-    }),
-    axios.post(`${BASE_URL}/novels/${createdNovel.id}/chapters`, {
-      title: 'Auto Chapter B',
-      text: 'Text for concurrent auto chapter B...',
-      requested_by: writerUser.id,
-      // chapter_number intentionally omitted
-    }),
-    axios.post(`${BASE_URL}/novels/${createdNovel.id}/chapters`, {
-      title: 'Auto Chapter C',
-      text: 'Text for concurrent auto chapter C...',
-      requested_by: writerUser.id,
-      // chapter_number intentionally omitted
-    }),
+    axios.post(
+      `${BASE_URL}/novels/${createdNovel.id}/chapters`,
+      {
+        title: 'Auto Chapter A',
+        text: 'Text for concurrent auto chapter A...',
+        // chapter_number intentionally omitted
+      },
+      { headers: { Cookie: writerTokenCookie } }
+    ),
+    axios.post(
+      `${BASE_URL}/novels/${createdNovel.id}/chapters`,
+      {
+        title: 'Auto Chapter B',
+        text: 'Text for concurrent auto chapter B...',
+        // chapter_number intentionally omitted
+      },
+      { headers: { Cookie: writerTokenCookie } }
+    ),
+    axios.post(
+      `${BASE_URL}/novels/${createdNovel.id}/chapters`,
+      {
+        title: 'Auto Chapter C',
+        text: 'Text for concurrent auto chapter C...',
+        // chapter_number intentionally omitted
+      },
+      { headers: { Cookie: writerTokenCookie } }
+    ),
   ];
 
   const concurrentResults = await Promise.all(concurrentUploads);
@@ -663,19 +686,19 @@ async function runTests() {
     console.log('  ✔ RBAC Check: Reader chapter ingestion rejected with 403 Forbidden');
   }
 
-  // 7.7 Reader requested_by to POST /api/novels/:id/chapters must be rejected with 403
+  // 7.7 Unauthenticated requested_by spoofing to POST /api/novels/:id/chapters must be rejected with 401
   try {
     await axios.post(`${BASE_URL}/novels/${createdNovel.id}/chapters`, {
       title: 'Reader Requested Chapter Ingestion',
-      text: 'Sample unauthorized text from a reader requested_by.',
-      requested_by: readerUser.id,
+      text: 'Sample unauthorized text from unauthenticated requested_by.',
+      requested_by: writerUser.id,
     });
-    throw new Error('Expected reader requested_by chapter ingestion to fail');
+    throw new Error('Expected unauthenticated requested_by chapter ingestion to fail');
   } catch (err) {
-    if (err.response?.status !== 403) {
-      throw new Error(`Expected 403 Forbidden for reader requested_by chapter ingestion, got ${err.response?.status}`);
+    if (err.response?.status !== 401) {
+      throw new Error(`Expected 401 Unauthorized for unauthenticated requested_by, got ${err.response?.status}`);
     }
-    console.log('  ✔ RBAC Check: Reader requested_by chapter ingestion rejected with 403 Forbidden');
+    console.log('  ✔ Security Check: Unauthenticated requested_by chapter ingestion rejected with 401 Unauthorized');
   }
   // 7.8 Verify /api/health and /api/chapters/:id/progress endpoints
   const healthRes = await axios.get(`${BASE_URL}/health`);

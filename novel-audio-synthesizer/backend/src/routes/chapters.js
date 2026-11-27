@@ -67,28 +67,24 @@ function persistChapterToDisk(chapterId, title, text) {
   }
 }
 
-async function getOrCreateDefaultNovel() {
-  const existing = await pool.query('SELECT id FROM novels ORDER BY created_at ASC LIMIT 1');
-  if (existing.rows.length > 0) {
-    return existing.rows[0].id;
+async function getOrCreateDefaultNovel(ownerId) {
+  if (!ownerId || !UUID_REGEX.test(String(ownerId))) {
+    throw { status: 401, message: 'Authentication required to select or create a novel.' };
   }
-  let userRes = await pool.query("SELECT id FROM users WHERE role IN ('writer', 'admin') LIMIT 1");
-  if (userRes.rows.length === 0) {
-    userRes = await pool.query(`
-      INSERT INTO users (username, email, password_hash, role)
-      VALUES ('synctone_author', 'author@synctone.internal', crypt('author123', gen_salt('bf')), 'writer')
-      ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email
-      RETURNING id;
-    `);
+  const existingOwned = await pool.query(
+    'SELECT id FROM novels WHERE added_by = $1 ORDER BY created_at ASC LIMIT 1',
+    [ownerId]
+  );
+  if (existingOwned.rows.length > 0) {
+    return existingOwned.rows[0].id;
   }
-  const authorId = userRes.rows[0].id;
   const novelRes = await pool.query(
     `
     INSERT INTO novels (title, synopsis, channel, added_by)
-    VALUES ('Demo Novel', 'Default novel for direct chapter uploads.', 'verified', $1)
+    VALUES ('Uploaded Chapters', 'Default novel for direct chapter uploads.', 'community', $1)
     RETURNING id;
   `,
-    [authorId]
+    [ownerId]
   );
   return novelRes.rows[0].id;
 }
@@ -784,12 +780,34 @@ async function healChapterDocument(chapterDoc, novelIdHint = null, pgPool = pool
 /**
  * Common ingestion helper: performs atomic PostgreSQL transaction and MongoDB document creation.
  */
-async function ingestChapter({ novelId, title, text, chapterNumber, requestedBy }) {
+async function ingestChapter({ novelId, title, text, chapterNumber, requestedBy, actorRole = null }) {
   let client;
   let clientReleased = false;
   let createdPgChapter = null;
 
   try {
+    if (!requestedBy || typeof requestedBy !== 'string' || !UUID_REGEX.test(requestedBy)) {
+      throw { status: 401, message: 'Authentication required. Valid authenticated user ID is required.' };
+    }
+
+    const userRes = await pool.query('SELECT id, role FROM users WHERE id = $1', [requestedBy]);
+    if (userRes.rows.length === 0) {
+      throw { status: 401, message: 'Authenticated user account not found.' };
+    }
+    const effectiveRole = actorRole || userRes.rows[0].role;
+    if (effectiveRole === 'reader') {
+      throw { status: 403, message: "Forbidden: role 'reader' cannot ingest chapters." };
+    }
+
+    // Fail fast on missing novel or non-owner before running heavy LLM/OCR parsing
+    const preNovelCheck = await pool.query('SELECT id, added_by FROM novels WHERE id = $1', [novelId]);
+    if (preNovelCheck.rows.length === 0) {
+      throw { status: 404, message: `Novel with id '${novelId}' not found.` };
+    }
+    if (effectiveRole !== 'admin' && preNovelCheck.rows[0].added_by !== requestedBy) {
+      throw { status: 403, message: 'Forbidden: you do not have permission to ingest chapters into this novel.' };
+    }
+
     // Parse segments & timeline BEFORE opening a PostgreSQL transaction so long-running LLM/OCR calls never hold row locks
     const preChapterId = uuidv4();
     const preliminaryTitle = title && typeof title === 'string' && title.trim().length > 0
@@ -805,14 +823,17 @@ async function ingestChapter({ novelId, title, text, chapterNumber, requestedBy 
     client = await pool.connect();
     await client.query('BEGIN');
 
-    // 1. Verify novel exists and lock parent novel row with FOR UPDATE when auto-numbering
+    // 1. Verify novel exists & re-check ownership atomically; lock parent novel row with FOR UPDATE when auto-numbering
     // to serialize concurrent insertions and prevent chapter numbering race conditions
     const novelQuery = (!chapterNumber || chapterNumber < 1)
-      ? 'SELECT id FROM novels WHERE id = $1 FOR UPDATE'
-      : 'SELECT id FROM novels WHERE id = $1';
+      ? 'SELECT id, added_by FROM novels WHERE id = $1 FOR UPDATE'
+      : 'SELECT id, added_by FROM novels WHERE id = $1';
     const novelCheck = await client.query(novelQuery, [novelId]);
     if (novelCheck.rows.length === 0) {
       throw { status: 404, message: `Novel with id '${novelId}' not found.` };
+    }
+    if (effectiveRole !== 'admin' && novelCheck.rows[0].added_by !== requestedBy) {
+      throw { status: 403, message: 'Forbidden: you do not have permission to ingest chapters into this novel.' };
     }
 
     // 2. Determine chapter_number if not provided
@@ -943,11 +964,11 @@ async function ingestChapter({ novelId, title, text, chapterNumber, requestedBy 
  * 1. POST /api/novels/:id/chapters
  * Official Polyglot Chapter Ingestion route (saves text to Mongo, enqueues job in Postgres).
  */
-router.post('/novels/:id/chapters', optionalAuth, async (req, res) => {
+router.post('/novels/:id/chapters', authenticateUser, requireRole('writer', 'admin'), async (req, res) => {
   try {
     const novelId = req.params.id;
     const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
-    const { text, title, chapter_number, requested_by } = body;
+    const { text, title, chapter_number } = body;
 
     if (!novelId || !UUID_REGEX.test(novelId)) {
       return res.status(400).json({ error: 'Invalid novel UUID in route parameter.' });
@@ -966,45 +987,23 @@ router.post('/novels/:id/chapters', optionalAuth, async (req, res) => {
       parsedChapterNumber = n > 0 ? n : undefined;
     }
 
-    // Verify novel exists in PostgreSQL before authorization checks
-    const novelCheck = await pool.query('SELECT id FROM novels WHERE id = $1', [novelId]);
+    // Verify novel exists in PostgreSQL and enforce novel ownership
+    const novelCheck = await pool.query('SELECT id, added_by FROM novels WHERE id = $1', [novelId]);
     if (novelCheck.rows.length === 0) {
       return res.status(404).json({ error: `Novel with id '${novelId}' not found.` });
     }
-
-    // Verify caller has authorized writer/admin role
-    if (req.user) {
-      if (req.user.role === 'reader') {
-        return res.status(403).json({ error: "Forbidden: role 'reader' cannot ingest chapters." });
-      }
-    } else if (requested_by) {
-      if (!UUID_REGEX.test(requested_by)) {
-        return res.status(400).json({ error: 'Invalid requested_by user UUID.' });
-      }
-      const userRoleCheck = await pool.query('SELECT role FROM users WHERE id = $1', [requested_by]);
-      if (userRoleCheck.rows.length === 0) {
-        return res.status(404).json({ error: `User with id '${requested_by}' does not exist.` });
-      }
-      if (userRoleCheck.rows[0].role === 'reader') {
-        return res.status(403).json({ error: "Forbidden: role 'reader' cannot ingest chapters." });
-      }
-    } else {
-      return res.status(401).json({
-        error: 'Authentication required. Please log in or provide an authorized writer user ID.',
-      });
+    if (req.user.role !== 'admin' && novelCheck.rows[0].added_by !== req.user.id) {
+      return res.status(403).json({ error: 'Forbidden: you do not own this novel.' });
     }
 
-    // Prevent IDOR: authenticated users always use their own id unless admin
-    const effectiveRequestedBy = (req.user && req.user.role !== 'admin')
-      ? req.user.id
-      : (requested_by || req.user?.id || null);
-
+    // Derive writer identity exclusively from the authenticated session
     const result = await ingestChapter({
       novelId,
       title,
       text,
       chapterNumber: parsedChapterNumber,
-      requestedBy: effectiveRequestedBy,
+      requestedBy: req.user.id,
+      actorRole: req.user.role,
     });
 
     return res.status(201).json({
@@ -1027,53 +1026,32 @@ router.post('/novels/:id/chapters', optionalAuth, async (req, res) => {
 
 /**
  * 2. POST /api/upload
- * Backwards-compatible upload route: ingests into specified novel or default novel.
+ * Backwards-compatible upload route: ingests into specified novel or user's default novel.
  */
-router.post('/upload', optionalAuth, async (req, res) => {
+router.post('/upload', authenticateUser, requireRole('writer', 'admin'), async (req, res) => {
   try {
     const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
-    const { text, title = 'Untitled Chapter', novel_id, requested_by } = body;
+    const { text, title = 'Untitled Chapter', novel_id } = body;
 
     if (!text || typeof text !== 'string' || text.trim().length === 0) {
       return res.status(400).json({ error: 'Missing or invalid "text" field' });
     }
 
-    if (req.user) {
-      if (req.user.role === 'reader') {
-        return res.status(403).json({ error: "Forbidden: role 'reader' cannot ingest chapters." });
-      }
-    } else if (requested_by) {
-      if (!UUID_REGEX.test(requested_by)) {
-        return res.status(400).json({ error: 'Invalid requested_by user UUID.' });
-      }
-      const userRoleCheck = await pool.query('SELECT role FROM users WHERE id = $1', [requested_by]);
-      if (userRoleCheck.rows.length === 0) {
-        return res.status(404).json({ error: `User with id '${requested_by}' does not exist.` });
-      }
-      if (userRoleCheck.rows[0].role === 'reader') {
-        return res.status(403).json({ error: "Forbidden: role 'reader' cannot ingest chapters." });
+    let effectiveNovelId = novel_id;
+    if (effectiveNovelId !== undefined && effectiveNovelId !== null && effectiveNovelId !== '') {
+      if (typeof effectiveNovelId !== 'string' || !UUID_REGEX.test(effectiveNovelId)) {
+        return res.status(400).json({ error: 'Invalid novel_id UUID.' });
       }
     } else {
-      return res.status(401).json({
-        error: 'Authentication required. Please log in or provide an authorized writer user ID.',
-      });
+      effectiveNovelId = await getOrCreateDefaultNovel(req.user.id);
     }
-
-    let effectiveNovelId = novel_id;
-    if (!effectiveNovelId || !UUID_REGEX.test(effectiveNovelId)) {
-      effectiveNovelId = await getOrCreateDefaultNovel();
-    }
-
-    // Prevent IDOR: authenticated users always use their own id unless admin
-    const effectiveRequestedBy = (req.user && req.user.role !== 'admin')
-      ? req.user.id
-      : (requested_by || req.user?.id || null);
 
     const result = await ingestChapter({
       novelId: effectiveNovelId,
       title,
       text,
-      requestedBy: effectiveRequestedBy,
+      requestedBy: req.user.id,
+      actorRole: req.user.role,
     });
 
     console.log(`[Chapters] Uploaded '${result.chapter.title}' as ${result.chapter.id}`);
@@ -1083,6 +1061,9 @@ router.post('/upload', optionalAuth, async (req, res) => {
       job: result.job,
     });
   } catch (err) {
+    if (err.status) {
+      return res.status(err.status).json({ error: err.message });
+    }
     console.error('[Upload Error]:', err);
     return res.status(500).json({ error: 'Failed to upload chapter.' });
   }
@@ -2406,5 +2387,6 @@ router.needsSelfHealingReparse = needsSelfHealingReparse;
 router.healChapterDocument = healChapterDocument;
 router.upsertDiscoveredCharactersPg = upsertDiscoveredCharactersPg;
 router.sanitizeSegmentSource = sanitizeSegmentSource;
+router.ingestChapter = ingestChapter;
 
 module.exports = router;
