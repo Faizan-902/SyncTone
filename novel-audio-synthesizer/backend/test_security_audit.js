@@ -374,6 +374,155 @@ async function runTests() {
 
     await pool.query('DELETE FROM novels WHERE id = $1', [novelBId]).catch(() => {});
     console.log('  ✔ Issue 2 authorization & ownership checks passed!');
+
+    // =========================================================================
+    // [Issue 4] Production JWT Secret Hardening & Startup Fail-Fast
+    // =========================================================================
+    console.log('\n▶ [Issue 4] Testing Production JWT_SECRET Compose, Startup & deploy-prod.sh...');
+    const { execFileSync, spawnSync } = require('child_process');
+    const os = require('os');
+    const repoRoot = path.resolve(__dirname, '../..');
+    const composeProdFile = path.join(repoRoot, 'docker-compose.prod.yml');
+
+    // 4.1 docker-compose.prod.yml MUST reject missing/empty JWT_SECRET
+    const composeNoJwt = spawnSync(
+      'docker',
+      ['compose', '-f', composeProdFile, '--env-file', '/dev/null', 'config', '--quiet'],
+      {
+        cwd: repoRoot,
+        env: { ...process.env, JWT_SECRET: '' },
+        encoding: 'utf8',
+      }
+    );
+    assert.notStrictEqual(
+      composeNoJwt.status,
+      0,
+      'docker-compose.prod.yml must fail when JWT_SECRET is missing or empty'
+    );
+
+    const composeWithJwt = spawnSync(
+      'docker',
+      ['compose', '-f', composeProdFile, '--env-file', '/dev/null', 'config', '--quiet'],
+      {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          JWT_SECRET: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+          POSTGRES_PASSWORD: 'prod_pg_test_password',
+          MONGO_PASSWORD: 'prod_mongo_test_password',
+        },
+        encoding: 'utf8',
+      }
+    );
+    assert.strictEqual(
+      composeWithJwt.status,
+      0,
+      `docker-compose.prod.yml must validate cleanly when JWT_SECRET is set: ${composeWithJwt.stderr}`
+    );
+
+    // 4.2 Production startup MUST fail for missing, short, placeholder, or low-entropy JWT_SECRET
+    const insecureSecrets = [
+      '',
+      'short_secret',
+      'synctone_production_jwt_secret_token_key_2026',
+      'synctone_super_secret_jwt_key_2026_dev_mode',
+      'super_secret_jwt_key_synctone_2026',
+      'replace_with_a_cryptographically_secure_random_jwt_secret_key_2026',
+      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    ];
+    for (const badSecret of insecureSecrets) {
+      const bootRes = spawnSync(
+        process.execPath,
+        ['-e', "require('./novel-audio-synthesizer/backend/src/config')"],
+        {
+          cwd: repoRoot,
+          env: { ...process.env, NODE_ENV: 'production', JWT_SECRET: badSecret },
+          encoding: 'utf8',
+        }
+      );
+      assert.notStrictEqual(
+        bootRes.status,
+        0,
+        `Production startup must fail for insecure JWT_SECRET="${badSecret}"`
+      );
+      if (badSecret.length > 0) {
+        assert.ok(
+          !bootRes.stderr.includes(badSecret) && !bootRes.stdout.includes(badSecret),
+          'Startup error output must never leak secret value'
+        );
+      }
+    }
+
+    const validProdSecret = '9f8e7d6c5b4a392817263544536271809f8e7d6c5b4a39281726354453627180';
+    const goodBoot = spawnSync(
+      process.execPath,
+      ['-e', "require('./novel-audio-synthesizer/backend/src/config'); console.log('PROD_BOOT_OK')"],
+      {
+        cwd: repoRoot,
+        env: { ...process.env, NODE_ENV: 'production', JWT_SECRET: validProdSecret },
+        encoding: 'utf8',
+      }
+    );
+    assert.strictEqual(goodBoot.status, 0, `Production config must boot with secure JWT_SECRET: ${goodBoot.stderr}`);
+    assert.ok(goodBoot.stdout.includes('PROD_BOOT_OK'));
+
+    // 4.3 scripts/deploy-prod.sh generates random JWT_SECRET, preserves across redeploys, heals insecure values, sets 0600, never logs secret
+    const tmpDeployDir = fs.mkdtempSync(path.join(os.tmpdir(), 'synctone-deploy-test-'));
+    try {
+      fs.mkdirSync(path.join(tmpDeployDir, 'scripts'), { recursive: true });
+      fs.copyFileSync(path.join(repoRoot, '.env.example'), path.join(tmpDeployDir, '.env.example'));
+      fs.copyFileSync(path.join(repoRoot, 'scripts/deploy-prod.sh'), path.join(tmpDeployDir, 'scripts/deploy-prod.sh'));
+      fs.chmodSync(path.join(tmpDeployDir, 'scripts/deploy-prod.sh'), 0o755);
+
+      const firstRun = execFileSync('bash', ['scripts/deploy-prod.sh', '--init-env-only'], {
+        cwd: tmpDeployDir,
+        encoding: 'utf8',
+      });
+      const envPath = path.join(tmpDeployDir, '.env');
+      assert.ok(fs.existsSync(envPath), '.env must be created by deploy-prod.sh');
+      const mode = fs.statSync(envPath).mode & 0o777;
+      assert.strictEqual(mode, 0o600, `.env permissions must be 0600, got ${mode.toString(8)}`);
+
+      const envContent1 = fs.readFileSync(envPath, 'utf8');
+      const secretMatch1 = envContent1.match(/^JWT_SECRET=(.+)$/m);
+      assert.ok(secretMatch1 && secretMatch1[1].trim().length >= 32, 'Generated JWT_SECRET must be >= 32 chars');
+      const generatedSecret = secretMatch1[1].trim();
+      assert.ok(!generatedSecret.includes('replace_with_'), 'Placeholder JWT_SECRET must be replaced');
+      assert.ok(!firstRun.includes(generatedSecret), 'deploy-prod.sh output must never expose JWT_SECRET in logs');
+
+      // Redeployment preserves valid existing JWT_SECRET
+      const secondRun = execFileSync('bash', ['scripts/deploy-prod.sh', '--init-env-only'], {
+        cwd: tmpDeployDir,
+        encoding: 'utf8',
+      });
+      const envContent2 = fs.readFileSync(envPath, 'utf8');
+      const secretMatch2 = envContent2.match(/^JWT_SECRET=(.+)$/m);
+      assert.strictEqual(secretMatch2[1].trim(), generatedSecret, 'JWT_SECRET must be preserved across redeployments');
+      assert.ok(!secondRun.includes(generatedSecret), 'Redeploy logs must never expose JWT_SECRET');
+
+      // Existing insecure placeholder in .env must be healed automatically
+      fs.writeFileSync(
+        envPath,
+        envContent2.replace(`JWT_SECRET=${generatedSecret}`, 'JWT_SECRET=synctone_production_jwt_secret_token_key_2026'),
+        'utf8'
+      );
+      execFileSync('bash', ['scripts/deploy-prod.sh', '--init-env-only'], {
+        cwd: tmpDeployDir,
+        encoding: 'utf8',
+      });
+      const envContent3 = fs.readFileSync(envPath, 'utf8');
+      const secretMatch3 = envContent3.match(/^JWT_SECRET=(.+)$/m);
+      assert.ok(
+        secretMatch3 &&
+          secretMatch3[1].trim().length >= 32 &&
+          secretMatch3[1].trim() !== 'synctone_production_jwt_secret_token_key_2026',
+        'Insecure JWT_SECRET in existing .env must be rotated cleanly'
+      );
+    } finally {
+      fs.rmSync(tmpDeployDir, { recursive: true, force: true });
+    }
+
+    console.log('  ✔ Issue 4 production JWT_SECRET checks passed!');
   } finally {
     if (novelBId) {
       await Chapter.deleteMany({ novel_id: novelBId }).catch(() => {});

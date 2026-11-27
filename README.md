@@ -182,10 +182,16 @@ SWIFT_PROJECT_NAME=synctone_audio
 SWIFT_CONTAINER_AUDIO=novel-chapters
 SWIFT_CONTAINER_COVERS=novel-covers
 
-# JWT & API Secrets
-JWT_SECRET=super_secret_jwt_key_synctone_2026
+# JWT & API Secrets (Required: minimum 32 high-entropy characters; never commit real secrets)
+# Generate securely with: openssl rand -hex 32
+JWT_SECRET=<replace-with-output-of-openssl-rand-hex-32>
 PORT=4000
 ```
+
+### Production Deployment & Secret Management
+- `docker-compose.prod.yml` requires `JWT_SECRET` in `.env` or environment and fails startup if missing or empty (no hardcoded production fallback).
+- The API backend refuses to start when `NODE_ENV=production` if `JWT_SECRET` is missing, shorter than 32 characters, low-entropy, or equal to any example/placeholder string.
+- Run `./scripts/deploy-prod.sh` to deploy or update: it generates a 256-bit `JWT_SECRET` cleanly into `.env` (`chmod 600`, never printed to stdout/logs) on fresh installs, upgrades placeholder secrets automatically, and **preserves** valid existing `.env` secrets across redeployments.
 
 ### 3. Install Dependencies
 ```bash
