@@ -1346,6 +1346,160 @@ router.post('/parse/:chapter_id', authenticateUser, requireRole('writer', 'admin
  * 5. POST /api/synthesize/:chapter_id
  * Synthesizes segment audio via Edge TTS (Kokoro fallback), stitches PCM/MP3, updates MongoDB manifest & PostgreSQL chapters/jobs.
  */
+async function claimOrReuseChapterSynthesisJob(chapterId, requestedBy, lockTimeoutSec = 300) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1::text))', [String(chapterId)]);
+
+    const existingRes = await client.query(
+      `SELECT j.*
+       FROM synthesis_jobs j
+       JOIN chapter_synthesis_job_targets t ON t.job_id = j.id
+       WHERE t.chapter_id = $1
+       ORDER BY j.created_at DESC
+       LIMIT 1
+       FOR UPDATE`,
+      [chapterId]
+    );
+    const latest = existingRes.rows[0] || null;
+
+    if (latest) {
+      if (latest.status === 'processing') {
+        const lockedAtMs = latest.locked_at ? new Date(latest.locked_at).getTime() : 0;
+        const isStale = !lockedAtMs || Date.now() - lockedAtMs > lockTimeoutSec * 1000;
+        if (!isStale) {
+          await client.query('COMMIT');
+          return { conflict: true, job: latest };
+        }
+        if (latest.attempts < latest.max_attempts) {
+          const reclaimed = await client.query(
+            `UPDATE synthesis_jobs
+             SET status = 'processing',
+                 worker_id = 'api-gateway',
+                 locked_at = now(),
+                 attempts = attempts + 1,
+                 progress_pct = 5.0,
+                 error_message = NULL
+             WHERE id = $1
+             RETURNING *`,
+            [latest.id]
+          );
+          await client.query('COMMIT');
+          return { conflict: false, job: reclaimed.rows[0] };
+        }
+        await client.query(
+          `UPDATE synthesis_jobs
+           SET status = 'failed', worker_id = NULL, locked_at = NULL,
+               error_message = 'Failed: stale worker lock exceeded max_attempts'
+           WHERE id = $1`,
+          [latest.id]
+        );
+      } else if (
+        latest.status === 'queued' ||
+        (latest.status === 'failed' && latest.attempts < latest.max_attempts)
+      ) {
+        const claimed = await client.query(
+          `UPDATE synthesis_jobs
+           SET status = 'processing',
+               worker_id = 'api-gateway',
+               locked_at = now(),
+               attempts = attempts + 1,
+               progress_pct = 5.0,
+               error_message = NULL
+           WHERE id = $1
+           RETURNING *`,
+          [latest.id]
+        );
+        await client.query('COMMIT');
+        return { conflict: false, job: claimed.rows[0] };
+      }
+    }
+
+    const inserted = await client.query(
+      `INSERT INTO synthesis_jobs (requested_by, job_type, status, progress_pct, attempts, worker_id, locked_at)
+       VALUES ($1, 'synthesize_chapter', 'processing', 5.0, 1, 'api-gateway', now())
+       RETURNING *`,
+      [requestedBy || null]
+    );
+    const createdJob = inserted.rows[0];
+    await client.query(
+      'INSERT INTO chapter_synthesis_job_targets (job_id, chapter_id) VALUES ($1, $2)',
+      [createdJob.id, chapterId]
+    );
+    await client.query('COMMIT');
+    return { conflict: false, job: createdJob };
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+async function ensureQueuedChapterSynthesisJob(chapterId, requestedBy, lockTimeoutSec = 300) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1::text))', [String(chapterId)]);
+
+    const existingRes = await client.query(
+      `SELECT j.*
+       FROM synthesis_jobs j
+       JOIN chapter_synthesis_job_targets t ON t.job_id = j.id
+       WHERE t.chapter_id = $1
+       ORDER BY j.created_at DESC
+       LIMIT 1
+       FOR UPDATE`,
+      [chapterId]
+    );
+    const latest = existingRes.rows[0] || null;
+    if (latest) {
+      if (latest.status === 'queued') {
+        await client.query('COMMIT');
+        return { conflict: false, job: latest };
+      }
+      if (latest.status === 'processing') {
+        const lockedAtMs = latest.locked_at ? new Date(latest.locked_at).getTime() : 0;
+        const isStale = !lockedAtMs || Date.now() - lockedAtMs > lockTimeoutSec * 1000;
+        if (!isStale) {
+          await client.query('COMMIT');
+          return { conflict: true, job: latest };
+        }
+        if (latest.attempts < latest.max_attempts) {
+          const requeued = await client.query(
+            `UPDATE synthesis_jobs
+             SET status = 'queued', worker_id = NULL, locked_at = NULL, run_after = now(), progress_pct = 0.0
+             WHERE id = $1 RETURNING *`,
+            [latest.id]
+          );
+          await client.query('COMMIT');
+          return { conflict: false, job: requeued.rows[0] };
+        }
+      }
+    }
+
+    const inserted = await client.query(
+      `INSERT INTO synthesis_jobs (requested_by, job_type, status, progress_pct)
+       VALUES ($1, 'synthesize_chapter', 'queued', 0.0)
+       RETURNING *`,
+      [requestedBy || null]
+    );
+    const createdJob = inserted.rows[0];
+    await client.query(
+      'INSERT INTO chapter_synthesis_job_targets (job_id, chapter_id) VALUES ($1, $2)',
+      [createdJob.id, chapterId]
+    );
+    await client.query('COMMIT');
+    return { conflict: false, job: createdJob };
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 router.post('/synthesize/:chapter_id', authenticateUser, requireRole('writer', 'admin'), async (req, res) => {
   const { chapter_id } = req.params;
 
@@ -1368,6 +1522,26 @@ router.post('/synthesize/:chapter_id', authenticateUser, requireRole('writer', '
     return res.status(500).json({ error: 'Failed to verify chapter ownership.' });
   }
 
+  const runAsyncWorkerMode = req.body?.async === true || String(req.query?.async || '').toLowerCase() === 'true';
+  if (runAsyncWorkerMode) {
+    try {
+      const queued = await ensureQueuedChapterSynthesisJob(chapter_id, req.user.id);
+      if (queued.conflict) {
+        return res.status(409).json({
+          error: 'Chapter synthesis is already in progress.',
+          job_id: queued.job.id,
+        });
+      }
+      return res.status(202).json({
+        status: 'queued',
+        chapter_id,
+        job: queued.job,
+      });
+    } catch (qErr) {
+      return res.status(500).json({ error: 'Failed to enqueue chapter synthesis job.', detail: qErr.message });
+    }
+  }
+
   const preferredEngine = String(req.body?.engine || req.query?.engine || 'auto').trim() || 'auto';
   const normalizedEngineKey = preferredEngine.toLowerCase();
 
@@ -1384,6 +1558,7 @@ router.post('/synthesize/:chapter_id', authenticateUser, requireRole('writer', '
   }
 
   const runSynthesisTask = async () => {
+    let claimedJob = null;
     try {
       const chapterDoc = await Chapter.findOne({ pg_chapter_id: chapter_id });
       if (!chapterDoc) {
@@ -1394,7 +1569,20 @@ router.post('/synthesize/:chapter_id', authenticateUser, requireRole('writer', '
         return { errorStatus: 400, errorBody: { detail: 'Chapter not yet parsed. Call /parse first.' } };
       }
 
-      // Mark as processing in PostgreSQL (supports both 'processing' and legacy 'synthesizing' check constraints)
+      // Claim & reuse queued job from ingestChapter (or prevent concurrent processing with 409)
+      const claimOutcome = await claimOrReuseChapterSynthesisJob(chapter_id, req.user.id);
+      if (claimOutcome.conflict) {
+        return {
+          errorStatus: 409,
+          errorBody: {
+            error: 'Chapter synthesis is already being processed by a worker.',
+            job_id: claimOutcome.job.id,
+          },
+        };
+      }
+      claimedJob = claimOutcome.job;
+
+      // Mark chapter as processing in PostgreSQL (supports both 'processing' and legacy 'synthesizing' check constraints)
       try {
         try {
           await pool.query(
@@ -1411,11 +1599,6 @@ router.post('/synthesize/:chapter_id', authenticateUser, requireRole('writer', '
             throw chStatusErr;
           }
         }
-        await pool.query(
-          `UPDATE synthesis_jobs SET status = 'processing'
-           WHERE id IN (SELECT job_id FROM chapter_synthesis_job_targets WHERE chapter_id = $1)`,
-          [chapter_id]
-        );
       } catch (dbErr) {
         console.warn('[Synthesize] DB status update warning:', dbErr.message);
       }
@@ -1509,28 +1692,17 @@ router.post('/synthesize/:chapter_id', authenticateUser, requireRole('writer', '
               }
             );
           } catch (segErr) {
-            console.warn(`[Synthesize Segment Fallback] Segment ${i + 1} failed (${segErr.message}); falling back to Machine/silence.`);
-            try {
-              result = await ttsEngine.synthesizeWithMachine(
-                seg.text,
-                effectiveVoiceId,
-                1.0,
-                {
-                  characterId: seg.character_id || seg.speaker_id || '',
-                  speakerName: seg.speaker_name || '',
-                  isNarrator: seg.type === 'narration' || String(seg.character_id || '').toLowerCase() === 'narrator',
-                }
-              );
-            } catch (_) {
-              const silentSamples = Math.floor((ttsEngine.sampleRate || 24000) * 0.25);
-              result = {
-                audio_buffer: Buffer.alloc(silentSamples * 2),
-                duration_ms: 250,
-                format: 'pcm',
-                engine: 'machine-tts',
-                resolved_voice_id: effectiveVoiceId,
-              };
-            }
+            console.warn(`[Synthesize Segment Fallback] Segment ${i + 1} failed (${segErr.message}); attempting Machine OS TTS fallback.`);
+            result = await ttsEngine.synthesizeWithMachine(
+              seg.text,
+              effectiveVoiceId,
+              1.0,
+              {
+                characterId: seg.character_id || seg.speaker_id || '',
+                speakerName: seg.speaker_name || '',
+                isNarrator: seg.type === 'narration' || String(seg.character_id || '').toLowerCase() === 'narrator',
+              }
+            );
           }
         }
 
@@ -1623,6 +1795,10 @@ router.post('/synthesize/:chapter_id', authenticateUser, requireRole('writer', '
       const swiftAudioObject = `${chapter_id}.${manifest.audio_format || 'mp3'}`;
       const audioFilePath = path.join(config.paths.outputDir, swiftAudioObject);
 
+      if (!fs.existsSync(audioFilePath) || fs.statSync(audioFilePath).size === 0) {
+        throw new Error(`Persisted chapter audio missing or empty at ${audioFilePath}`);
+      }
+
       // Upload synthesized audio to S3-compatible bucket (Supabase / B2 / R2) or OpenStack Swift
       if (fs.existsSync(audioFilePath)) {
         const contentType = swiftAudioObject.endsWith('.mp3')
@@ -1668,7 +1844,11 @@ router.post('/synthesize/:chapter_id', authenticateUser, requireRole('writer', '
         }
       }
 
-      // Update PostgreSQL chapters table
+      const chapterDir = path.join(config.paths.chaptersDir, chapter_id);
+      if (!fs.existsSync(chapterDir)) fs.mkdirSync(chapterDir, { recursive: true });
+      fs.writeFileSync(path.join(chapterDir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf-8');
+
+      // Update PostgreSQL chapters table only AFTER audio & manifest persistence succeed
       await pool.query(
         `
         UPDATE chapters 
@@ -1682,21 +1862,20 @@ router.post('/synthesize/:chapter_id', authenticateUser, requireRole('writer', '
         require('./novels').invalidateNovelsCache?.();
       } catch (_) {}
 
-      // Update PostgreSQL synthesis_jobs queue via target relation
-      await pool.query(
-        `
-        UPDATE synthesis_jobs 
-        SET status = 'completed', progress_pct = 1.0, completed_at = now() 
-        WHERE id IN (
-          SELECT job_id FROM chapter_synthesis_job_targets WHERE chapter_id = $1
+      // Mark ONLY the claimed synthesis_jobs row completed and release worker lock
+      if (claimedJob?.id) {
+        await pool.query(
+          `UPDATE synthesis_jobs
+           SET status = 'completed',
+               progress_pct = 100.0,
+               worker_id = NULL,
+               locked_at = NULL,
+               error_message = NULL,
+               completed_at = now()
+           WHERE id = $1`,
+          [claimedJob.id]
         );
-      `,
-        [chapter_id]
-      );
-
-      const chapterDir = path.join(config.paths.chaptersDir, chapter_id);
-      if (!fs.existsSync(chapterDir)) fs.mkdirSync(chapterDir, { recursive: true });
-      fs.writeFileSync(path.join(chapterDir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf-8');
+      }
 
       broadcastProgress(chapter_id, {
         chapter_id,
@@ -1712,15 +1891,36 @@ router.post('/synthesize/:chapter_id', authenticateUser, requireRole('writer', '
     } catch (err) {
       console.error('[Synthesize Chapter Error]:', err.message);
       try {
-        await pool.query(
-          "UPDATE chapters SET status = 'failed', updated_at = now() WHERE id = $1",
-          [chapter_id]
-        );
-        await pool.query(
-          `UPDATE synthesis_jobs SET status = 'failed', error_message = $1, completed_at = now()
-           WHERE id IN (SELECT job_id FROM chapter_synthesis_job_targets WHERE chapter_id = $2)`,
-          [err.message || 'Synthesis failed', chapter_id]
-        );
+        if (claimedJob?.id) {
+          const canRetry = Number(claimedJob.attempts || 1) < Number(claimedJob.max_attempts || 3);
+          if (canRetry) {
+            await pool.query("UPDATE chapters SET status = 'draft', updated_at = now() WHERE id = $1", [chapter_id]);
+            await pool.query(
+              `UPDATE synthesis_jobs
+               SET status = 'queued',
+                   worker_id = NULL,
+                   locked_at = NULL,
+                   run_after = now() + interval '4 seconds',
+                   error_message = $1
+               WHERE id = $2`,
+              [String(err.message || 'Synthesis failed').slice(0, 2000), claimedJob.id]
+            );
+          } else {
+            await pool.query("UPDATE chapters SET status = 'failed', updated_at = now() WHERE id = $1", [chapter_id]);
+            await pool.query(
+              `UPDATE synthesis_jobs
+               SET status = 'failed',
+                   worker_id = NULL,
+                   locked_at = NULL,
+                   error_message = $1,
+                   completed_at = now()
+               WHERE id = $2`,
+              [String(err.message || 'Synthesis failed').slice(0, 2000), claimedJob.id]
+            );
+          }
+        } else {
+          await pool.query("UPDATE chapters SET status = 'failed', updated_at = now() WHERE id = $1", [chapter_id]);
+        }
       } catch (_dbErr) {}
       broadcastProgress(chapter_id, {
         chapter_id,

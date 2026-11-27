@@ -252,6 +252,18 @@ async function runTests() {
     const charACheckAfterFail = await pool.query('SELECT voice_id FROM characters WHERE id = $1', [charAId]);
     assert.strictEqual(charACheckAfterFail.rows[0].voice_id, 'en-GB-RyanNeural', 'Unauthorized voice assign mutated PG!');
 
+    // 2.4b POST /api/voices/assign: legitimate writerA passes own chapterA_id with writerB's characterB_id -> 403 cross-novel mismatch
+    const vaCrossChapterCharMismatch = await axios.post(
+      `${baseUrl}/voices/assign`,
+      { character_id: charBId, new_voice_id: 'en-US-GuyNeural', chapter_id: chapterAId },
+      { headers: { Cookie: cookieA }, validateStatus: () => true }
+    );
+    assert.strictEqual(
+      vaCrossChapterCharMismatch.status,
+      403,
+      `Cross-novel character_id on own chapter_id must return 403, got ${vaCrossChapterCharMismatch.status}`
+    );
+
     // 2.5 POST /api/voices/assign: legitimate owner writerA succeeds -> 200
     const vaOwner = await axios.post(
       `${baseUrl}/voices/assign`,
