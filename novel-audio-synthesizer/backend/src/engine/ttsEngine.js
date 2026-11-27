@@ -393,6 +393,12 @@ function getSecMsGecToken() {
   }
 }
 
+function normalizeSpeed(speed) {
+  const num = Number(speed);
+  if (!Number.isFinite(num) || num <= 0) return 1.0;
+  return Math.max(0.25, Math.min(3.0, num));
+}
+
 function getPythonBin() {
   const pythonVenv = path.resolve(config.paths.modelsDir, '../.venv/bin/python');
   if (fs.existsSync(pythonVenv)) return pythonVenv;
@@ -495,35 +501,45 @@ class TTSEngine {
         if (!finished) {
           finished = true;
           try {
-            ws.close();
+            ws.terminate();
           } catch (_) {}
           reject(new Error('Edge TTS WebSocket timeout (6s)'));
         }
       }, 6000);
 
       ws.on('open', () => {
-        const configMsg =
-          'Content-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n' +
-          JSON.stringify({
-            context: {
-              synthesis: {
-                audio: {
-                  metadataoptions: {
-                    sentenceBoundaryEnabled: 'false',
-                    wordBoundaryEnabled: 'false',
+        if (finished || ws.readyState !== WebSocket.OPEN) return;
+        try {
+          const configMsg =
+            'Content-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n' +
+            JSON.stringify({
+              context: {
+                synthesis: {
+                  audio: {
+                    metadataoptions: {
+                      sentenceBoundaryEnabled: 'false',
+                      wordBoundaryEnabled: 'false',
+                    },
+                    outputFormat: 'audio-24khz-48kbitrate-mono-mp3',
                   },
-                  outputFormat: 'audio-24khz-48kbitrate-mono-mp3',
                 },
               },
-            },
-          });
-        ws.send(configMsg);
+            });
+          ws.send(configMsg);
 
-        const timestamp = new Date().toUTCString();
-        const requestId = crypto.randomUUID().replace(/-/g, '');
-        const ssml = `<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='en-US'><voice name='${voiceId}'><prosody pitch='${pitch}' rate='${rate}'>${safeText}</prosody></voice></speak>`;
-        const ssmlMsg = `X-RequestId:${requestId}\r\nContent-Type:application/ssml+xml\r\nX-Timestamp:${timestamp}Z\r\nPath:ssml\r\n\r\n${ssml}`;
-        ws.send(ssmlMsg);
+          const timestamp = new Date().toUTCString();
+          const requestId = crypto.randomUUID().replace(/-/g, '');
+          const ssml = `<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='en-US'><voice name='${voiceId}'><prosody pitch='${pitch}' rate='${rate}'>${safeText}</prosody></voice></speak>`;
+          const ssmlMsg = `X-RequestId:${requestId}\r\nContent-Type:application/ssml+xml\r\nX-Timestamp:${timestamp}Z\r\nPath:ssml\r\n\r\n${ssml}`;
+          ws.send(ssmlMsg);
+        } catch (sendErr) {
+          if (!finished) {
+            finished = true;
+            clearTimeout(timeout);
+            try { ws.terminate(); } catch (_) {}
+            reject(sendErr);
+          }
+        }
       });
 
       ws.on('message', (data, isBinary) => {
@@ -734,7 +750,8 @@ class TTSEngine {
 
   // --- ENGINE 2: Kokoro-TTS (Local ONNX / Acoustic Neural Fallback) ---
   async synthesizeWithKokoro(text, voiceId, speed = 1.0, options = {}) {
-    const trimmed = (text || '').trim();
+    const trimmed = typeof text === 'string' ? text.trim() : String(text || '').trim();
+    speed = normalizeSpeed(speed);
     if (!trimmed) {
       return {
         audio_buffer: Buffer.alloc(0),
@@ -825,7 +842,8 @@ class TTSEngine {
 
   // --- ENGINE 3: Machine / Local OS Speech Synthesis (Async non-blocking) ---
   async synthesizeWithMachine(text, voiceId, speed = 1.0, mixContext = {}) {
-    const trimmed = (text || '').trim();
+    const trimmed = typeof text === 'string' ? text.trim() : String(text || '').trim();
+    speed = normalizeSpeed(speed);
     const macVoice = resolveMacVoice(voiceId, mixContext);
     if (!trimmed) {
       return {
@@ -965,7 +983,8 @@ class TTSEngine {
 
   // --- ENGINE 4: Paradee-8M-v1.2 (Local Micro 8.5MB Int8 ONNX via Worker Pool) ---
   async synthesizeWithParadee(text, voiceId, speed = 1.0, mixContext = {}) {
-    const trimmed = (text || '').trim();
+    const trimmed = typeof text === 'string' ? text.trim() : String(text || '').trim();
+    speed = normalizeSpeed(speed);
     const charId = String(
       mixContext.characterId || mixContext.character_id || mixContext.speakerName || mixContext.speaker_name || ''
     ).trim();
@@ -1063,7 +1082,8 @@ class TTSEngine {
 
   // --- ENGINE 5: Mixed Paradee-8M (Primary 4 Cast) + Machine-TTS (5th+ Extra Cast) ---
   async synthesizeWithParadeeMixed(text, voiceId, speed = 1.0, mixContext = {}) {
-    const trimmed = (text || '').trim();
+    const trimmed = typeof text === 'string' ? text.trim() : String(text || '').trim();
+    speed = normalizeSpeed(speed);
     if (!trimmed) {
       return {
         audio_buffer: Buffer.alloc(0),
@@ -1109,7 +1129,8 @@ class TTSEngine {
 
   // --- Public Interface: 5-Engine Architecture (Selectable + Fallback Chain) ---
   async synthesizeSegment(text, voiceId, speed = 1.0, preferredEngine = 'auto', mixContext = {}) {
-    const trimmed = (text || '').trim();
+    const trimmed = typeof text === 'string' ? text.trim() : String(text || '').trim();
+    const safeSpeed = normalizeSpeed(speed);
     if (!trimmed) {
       return {
         audio_buffer: Buffer.alloc(0),
@@ -1245,9 +1266,9 @@ class TTSEngine {
       };
     }
 
-    let effectiveSpeed = speed || 1.0;
+    let effectiveSpeed = safeSpeed;
     if (baseRatePct !== 0) {
-      effectiveSpeed = Number((effectiveSpeed * (1 + baseRatePct / 100)).toFixed(2));
+      effectiveSpeed = normalizeSpeed(Number((effectiveSpeed * (1 + baseRatePct / 100)).toFixed(2)));
     }
 
     // 1. Explicit Machine TTS
@@ -1280,9 +1301,9 @@ class TTSEngine {
     }
 
     // 5. 'msedge-tts' or 'auto' (Fallback Chain: msedge-tts -> kokoro-tts -> paradee-tts -> machine-tts)
-    if (speed && speed !== 1.0) {
-      const speedPct = Math.round((speed - 1.0) * 100);
-      const totalRate = baseRatePct + speedPct;
+    if (safeSpeed !== 1.0) {
+      const speedPct = Math.round((safeSpeed - 1.0) * 100);
+      const totalRate = Math.max(-45, Math.min(60, baseRatePct + speedPct));
       prosody.rate = `${totalRate >= 0 ? '+' : ''}${totalRate}%`;
     }
 

@@ -10,6 +10,7 @@ const router = Router();
 // In-memory cache for on-demand speech segments (speeds up replay and eliminates redundant Edge TTS calls)
 const speakCache = new Map();
 const MAX_CACHE_ENTRIES = 250;
+const speakInFlight = new Map();
 
 // In-memory cache for chapter-level cast plans (paradee-mixed mode)
 const castPlanCache = new Map();
@@ -167,7 +168,8 @@ async function handleSpeak(req, res) {
   try {
     const rawText = req.query.text !== undefined ? req.query.text : req.body?.text;
     const voice_id = (req.query.voice_id || req.body?.voice_id || 'en-GB-RyanNeural').toString().trim();
-    const speed = parseFloat(req.query.speed || req.body?.speed) || 1.0;
+    const rawSpeed = parseFloat(req.query.speed ?? req.body?.speed);
+    const speed = Number.isFinite(rawSpeed) && rawSpeed > 0 ? Math.max(0.25, Math.min(3.0, rawSpeed)) : 1.0;
     const engine = (req.query.engine || req.body?.engine || 'auto').toString().trim();
     const characterId = (req.query.character_id || req.body?.character_id || '').toString().trim();
     const speakerName = (req.query.speaker_name || req.body?.speaker_name || '').toString().trim();
@@ -192,58 +194,67 @@ async function handleSpeak(req, res) {
         return;
       }
       const cached = speakCache.get(cacheKey);
+      speakCache.delete(cacheKey);
+      speakCache.set(cacheKey, cached);
       return sendAudioBuffer(req, res, cached.buffer, cached.mimeType, cached.engine, cached.voice);
     }
 
-    // Build or lookup chapter cast plan for paradee-mixed if novel_id or chapter_id provided
-    let castPlan = null;
-    if (String(engine).toLowerCase() === 'paradee-mixed' && (chapter_id || novel_id)) {
-      castPlan = await getOrBuildCastPlan(novel_id, chapter_id);
+    let synthPromise = speakInFlight.get(cacheKey);
+    if (!synthPromise) {
+      synthPromise = (async () => {
+        // Build or lookup chapter cast plan for paradee-mixed if novel_id or chapter_id provided
+        let castPlan = null;
+        if (String(engine).toLowerCase() === 'paradee-mixed' && (chapter_id || novel_id)) {
+          castPlan = await getOrBuildCastPlan(novel_id, chapter_id);
+        }
+
+        const result = await ttsEngine.synthesizeSegment(cleanText, String(voice_id), speed, String(engine), {
+          characterId,
+          speakerName,
+          castSlot,
+          isNarrator,
+          gender,
+          castPlan,
+          explicitVoice,
+          novelId: novel_id,
+          chapterId: chapter_id,
+        });
+
+        let finalBuffer = result.audio_buffer;
+        let mimeType = result.format === 'mp3' ? 'audio/mpeg' : 'audio/wav';
+
+        if (result.format === 'pcm') {
+          const wavHeader = audioStitcher.createWavHeader(result.audio_buffer.length, 24000, 1, 16);
+          finalBuffer = Buffer.concat([wavHeader, result.audio_buffer]);
+          mimeType = 'audio/wav';
+        }
+
+        const resolvedVoice = result.resolved_voice_id || result.voice_id || voice_id;
+        const entry = {
+          buffer: finalBuffer,
+          mimeType,
+          engine: result.engine || 'msedge-tts',
+          voice: resolvedVoice,
+        };
+
+        if (speakCache.size >= MAX_CACHE_ENTRIES) {
+          const oldestKey = speakCache.keys().next().value;
+          speakCache.delete(oldestKey);
+        }
+        speakCache.set(cacheKey, entry);
+        return entry;
+      })().finally(() => {
+        speakInFlight.delete(cacheKey);
+      });
+      speakInFlight.set(cacheKey, synthPromise);
     }
 
+    const entry = await synthPromise;
     if (clientDisconnected || res.writableEnded || res.destroyed) {
       return;
     }
 
-    const result = await ttsEngine.synthesizeSegment(cleanText, String(voice_id), speed, String(engine), {
-      characterId,
-      speakerName,
-      castSlot,
-      isNarrator,
-      gender,
-      castPlan,
-      explicitVoice,
-      novelId: novel_id,
-      chapterId: chapter_id,
-    });
-
-    if (clientDisconnected || res.writableEnded || res.destroyed) {
-      return;
-    }
-
-    let finalBuffer = result.audio_buffer;
-    let mimeType = result.format === 'mp3' ? 'audio/mpeg' : 'audio/wav';
-
-    if (result.format === 'pcm') {
-      const wavHeader = audioStitcher.createWavHeader(result.audio_buffer.length, 24000, 1, 16);
-      finalBuffer = Buffer.concat([wavHeader, result.audio_buffer]);
-      mimeType = 'audio/wav';
-    }
-
-    const resolvedVoice = result.resolved_voice_id || result.voice_id || voice_id;
-
-    if (speakCache.size >= MAX_CACHE_ENTRIES) {
-      const oldestKey = speakCache.keys().next().value;
-      speakCache.delete(oldestKey);
-    }
-    speakCache.set(cacheKey, {
-      buffer: finalBuffer,
-      mimeType,
-      engine: result.engine || 'msedge-tts',
-      voice: resolvedVoice,
-    });
-
-    return sendAudioBuffer(req, res, finalBuffer, mimeType, result.engine || 'msedge-tts', resolvedVoice);
+    return sendAudioBuffer(req, res, entry.buffer, entry.mimeType, entry.engine, entry.voice);
   } catch (err) {
     if (clientDisconnected || res.writableEnded || res.destroyed) {
       return;
@@ -268,11 +279,18 @@ router.get('/voices', (_req, res) => {
 
 // POST /api/voices/assign
 router.post('/voices/assign', optionalAuth, async (req, res) => {
-
-  const { character_id, new_voice_id: rawNewVoiceId, voice_id: rawVoiceId, chapter_id, novel_id } = req.body;
+  const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
+  const { character_id, new_voice_id: rawNewVoiceId, voice_id: rawVoiceId, chapter_id, novel_id } = body;
   const new_voice_id = rawNewVoiceId || rawVoiceId;
-  if (!character_id || !new_voice_id) {
-    return res.status(400).json({ detail: 'character_id and new_voice_id are required' });
+  if (
+    !character_id ||
+    typeof character_id !== 'string' ||
+    !character_id.trim() ||
+    !new_voice_id ||
+    typeof new_voice_id !== 'string' ||
+    !new_voice_id.trim()
+  ) {
+    return res.status(400).json({ detail: 'character_id and new_voice_id strings are required' });
   }
 
   const { EDGE_TO_KOKORO_MAP } = require('../engine/voiceProfiler');
@@ -298,10 +316,11 @@ router.post('/voices/assign', optionalAuth, async (req, res) => {
   voiceProfiler.assignVoice(character_id, effectiveVoiceId);
 
   // Resolve character aliases (UUID <-> canonical_name <-> slug) for thorough MongoDB & cache invalidation
-  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(character_id));
+  const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const isUuid = UUID_PATTERN.test(String(character_id));
   let canonicalName = null;
   let pgCharUuid = isUuid ? String(character_id) : null;
-  let targetNovelId = novel_id || null;
+  let targetNovelId = typeof novel_id === 'string' && UUID_PATTERN.test(novel_id) ? novel_id : null;
 
   try {
     const { pool } = require('../db');

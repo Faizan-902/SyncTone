@@ -124,6 +124,9 @@ function toBuffer(body) {
 
 function parseByteRange(rangeHeader, totalSize) {
   if (!rangeHeader) return null;
+  if (!Number.isSafeInteger(totalSize) || totalSize <= 0) {
+    return { invalid: true };
+  }
   const trimmed = String(rangeHeader).trim();
   const match = /^bytes=(\d*)-(\d*)$/i.exec(trimmed);
   if (!match || (match[1] === '' && match[2] === '')) {
@@ -134,7 +137,7 @@ function parseByteRange(rangeHeader, totalSize) {
   let end;
   if (match[1] === '') {
     const suffixLen = parseInt(match[2], 10);
-    if (isNaN(suffixLen) || suffixLen <= 0) return { invalid: true };
+    if (!Number.isSafeInteger(suffixLen) || suffixLen <= 0) return { invalid: true };
     start = Math.max(0, totalSize - suffixLen);
     end = totalSize - 1;
   } else {
@@ -143,7 +146,13 @@ function parseByteRange(rangeHeader, totalSize) {
   }
 
   end = Math.min(end, totalSize - 1);
-  if (isNaN(start) || isNaN(end) || start < 0 || start >= totalSize || start > end) {
+  if (
+    !Number.isSafeInteger(start) ||
+    !Number.isSafeInteger(end) ||
+    start < 0 ||
+    start >= totalSize ||
+    start > end
+  ) {
     return { invalid: true };
   }
   return { start, end, invalid: false };
@@ -306,7 +315,7 @@ async function getGridFSObjectStream({ bucketType, safeKey, range }) {
 
   if (range) {
     const parsed = parseByteRange(range, totalSize);
-    if (parsed.invalid) {
+    if (!parsed || parsed.invalid) {
       return {
         status: 416,
         headers: {
@@ -406,11 +415,15 @@ async function getObjectStream({ bucketType = 'audio', key, range }) {
 function pipeStreamSafe(stream, res, onStreamError = null) {
   if (!stream || !res) return;
   const cleanup = () => {
+    res.removeListener('close', cleanup);
     if (typeof stream.destroy === 'function' && !stream.destroyed) {
       stream.destroy();
     }
   };
   res.on('close', cleanup);
+  stream.once('end', () => {
+    res.removeListener('close', cleanup);
+  });
   stream.on('error', (err) => {
     console.warn('[Storage Stream Error]:', err.message);
     if (typeof onStreamError === 'function') {

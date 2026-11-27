@@ -28,6 +28,7 @@ function resolveSchemaSqlPath() {
 }
 
 let authSchemaEnsured = false;
+let authSchemaPromise = null;
 
 const AUTH_EXTENSION_SQL = `
 ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL;
@@ -114,8 +115,7 @@ BEGIN
 END $$;
 `;
 
-async function ensureAuthSchemaTables(pgPool = pool) {
-  if (authSchemaEnsured) return false;
+async function runEnsureAuthSchemaTables(pgPool) {
   const check = await pgPool.query(
     `SELECT
        to_regclass('public.user_passkeys') AS pk_tbl,
@@ -141,8 +141,23 @@ async function ensureAuthSchemaTables(pgPool = pool) {
     changed = true;
     console.log('[DB] Enabled Row-Level Security & security_invoker views on public schema');
   }
-  authSchemaEnsured = true;
+  if (pgPool === pool) {
+    authSchemaEnsured = true;
+  }
   return changed;
+}
+
+async function ensureAuthSchemaTables(pgPool = pool) {
+  if (pgPool === pool && authSchemaEnsured) return false;
+  if (pgPool === pool) {
+    if (!authSchemaPromise) {
+      authSchemaPromise = runEnsureAuthSchemaTables(pgPool).finally(() => {
+        authSchemaPromise = null;
+      });
+    }
+    return authSchemaPromise;
+  }
+  return runEnsureAuthSchemaTables(pgPool);
 }
 
 /**

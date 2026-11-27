@@ -9,12 +9,15 @@ class AudioStitcher {
   }
 
   createWavHeader(dataByteLength, sampleRate = this.sampleRate, numChannels = 1, bitsPerSample = 16) {
+    const safeLen = Number.isFinite(dataByteLength) && dataByteLength > 0
+      ? Math.min(Math.floor(dataByteLength), 0xffffffdb)
+      : 0;
     const header = Buffer.alloc(44);
     const byteRate = (sampleRate * numChannels * bitsPerSample) / 8;
     const blockAlign = (numChannels * bitsPerSample) / 8;
 
     header.write('RIFF', 0);
-    header.writeUInt32LE(36 + dataByteLength, 4);
+    header.writeUInt32LE(36 + safeLen, 4);
     header.write('WAVE', 8);
     header.write('fmt ', 12);
     header.writeUInt32LE(16, 16);
@@ -25,19 +28,21 @@ class AudioStitcher {
     header.writeUInt16LE(blockAlign, 32);
     header.writeUInt16LE(bitsPerSample, 34);
     header.write('data', 36);
-    header.writeUInt32LE(dataByteLength, 40);
+    header.writeUInt32LE(safeLen, 40);
 
     return header;
   }
 
   createPcmSilenceBuffer(durationMs) {
-    const sampleCount = Math.floor((this.sampleRate * durationMs) / 1000);
+    const safeMs = Number.isFinite(durationMs) && durationMs > 0 ? durationMs : 0;
+    const sampleCount = Math.floor((this.sampleRate * safeMs) / 1000);
     return Buffer.alloc(sampleCount * 2);
   }
 
   createMp3SilenceBuffer(durationMs) {
     // MPEG-2 Layer 3, 24kHz, 48kbps mono = 144 bytes per frame (24ms per frame)
-    const frameCount = Math.max(1, Math.round(durationMs / 24));
+    const safeMs = Number.isFinite(durationMs) && durationMs > 0 ? durationMs : 24;
+    const frameCount = Math.max(1, Math.round(safeMs / 24));
     const frame = Buffer.alloc(144, 0);
     frame[0] = 0xff;
     frame[1] = 0xf3;
@@ -73,6 +78,7 @@ class AudioStitcher {
   }
 
   stitch(segments, chapterId) {
+    const segList = Array.isArray(segments) ? segments : [];
     const outputDir = config.paths.outputDir;
     if (!fs.existsSync(outputDir)) {
       fs.mkdirSync(outputDir, { recursive: true });
@@ -84,15 +90,16 @@ class AudioStitcher {
     let hasMp3 = false;
     let hasPcm = false;
 
-    for (const seg of segments) {
-      if (seg.format === 'mp3') hasMp3 = true;
-      else hasPcm = true;
+    for (const seg of segList) {
+      if (seg && seg.format === 'mp3') hasMp3 = true;
+      else if (seg) hasPcm = true;
     }
 
     const targetFormat = hasMp3 || !hasPcm ? 'mp3' : 'wav';
 
-    for (let i = 0; i < segments.length; i++) {
-      const seg = segments[i];
+    for (let i = 0; i < segList.length; i++) {
+      const seg = segList[i];
+      if (!seg) continue;
       let buffer = seg.audio_buffer || seg.pcm_buffer || Buffer.alloc(0);
       const durationMs = seg.duration_ms || 0;
 
@@ -135,7 +142,7 @@ class AudioStitcher {
     let outputFilename = `${safeChapterId}.${audioFormat}`;
 
     if (audioFormat === 'mp3') {
-      finalAudioBuffer = Buffer.concat(audioChunks);
+      finalAudioBuffer = audioChunks.length > 0 ? Buffer.concat(audioChunks) : this.createMp3SilenceBuffer(250);
     } else {
       const allPcm = Buffer.concat(audioChunks);
       const wavHeader = this.createWavHeader(allPcm.length);

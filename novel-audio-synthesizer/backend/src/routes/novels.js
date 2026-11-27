@@ -128,15 +128,25 @@ router.post('/novels/parse-file', upload.single('file'), async (req, res) => {
       tmpPath = req.file.path;
       originalName = req.file.originalname || 'book.epub';
       shouldUnlink = true;
-    } else if (req.body && req.body.file_base64) {
-      const ext = path.extname(req.body.file_name || 'book.txt').toLowerCase() || '.txt';
+    } else if (req.body && req.body.file_base64 !== undefined) {
+      if (typeof req.body.file_base64 !== 'string' || !req.body.file_base64.trim()) {
+        return res.status(400).json({ error: 'file_base64 must be a non-empty base64 string.' });
+      }
+      const safeReqName = typeof req.body.file_name === 'string' && req.body.file_name.trim()
+        ? path.basename(req.body.file_name.trim())
+        : 'book.txt';
+      const ext = path.extname(safeReqName).toLowerCase() || '.txt';
       const tmpName = `book_upload_${Date.now()}_${Math.random().toString(36).slice(2, 9)}${ext}`;
       tmpPath = path.join(os.tmpdir(), tmpName);
       const base64Data = req.body.file_base64.includes(',')
         ? req.body.file_base64.split(',')[1]
         : req.body.file_base64;
-      fs.writeFileSync(tmpPath, Buffer.from(base64Data, 'base64'));
-      originalName = req.body.file_name || tmpName;
+      const decodedBuf = Buffer.from(base64Data, 'base64');
+      if (decodedBuf.length === 0) {
+        return res.status(400).json({ error: 'Decoded file_base64 payload is empty.' });
+      }
+      fs.writeFileSync(tmpPath, decodedBuf);
+      originalName = safeReqName;
       shouldUnlink = true;
     } else {
       return res.status(400).json({ error: 'No file provided. Send multipart form with "file" or JSON with "file_base64".' });
@@ -233,6 +243,7 @@ router.post('/novels/parse-file', upload.single('file'), async (req, res) => {
 const ALLOWED_IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp']);
 
 router.post('/novels/upload-asset', upload.single('file'), async (req, res) => {
+  const uploadedTmpPath = req.file?.path || null;
   try {
     const coversDirs = Array.from(
       new Set([
@@ -247,20 +258,16 @@ router.post('/novels/upload-asset', upload.single('file'), async (req, res) => {
     if (req.file) {
       const rawExt = path.extname(req.file.originalname || '').toLowerCase();
       if (rawExt && !ALLOWED_IMAGE_EXTS.has(rawExt)) {
-        try { fs.unlinkSync(req.file.path); } catch (_) {}
         return res.status(400).json({ error: 'Only .jpg, .jpeg, .png, or .webp image files are allowed.' });
       }
       ext = rawExt === '.jpeg' ? '.jpg' : (rawExt || '.jpg');
       buffer = fs.readFileSync(req.file.path);
-      try {
-        fs.unlinkSync(req.file.path);
-      } catch (_) {}
-    } else if (req.body && req.body.data_url) {
-      const m = String(req.body.data_url).match(/^data:image\/(jpeg|jpg|png|webp);base64,(.+)$/i);
+    } else if (req.body && typeof req.body.data_url === 'string') {
+      const m = req.body.data_url.match(/^data:image\/(jpeg|jpg|png|webp);base64,([A-Za-z0-9+/=\s]+)$/i);
       if (m) {
         const fmt = m[1].toLowerCase();
         ext = fmt === 'png' ? '.png' : fmt === 'webp' ? '.webp' : '.jpg';
-        buffer = Buffer.from(m[2], 'base64');
+        buffer = Buffer.from(m[2].replace(/\s+/g, ''), 'base64');
       }
     }
 
@@ -299,6 +306,10 @@ router.post('/novels/upload-asset', upload.single('file'), async (req, res) => {
   } catch (err) {
     console.error('[Upload Asset Error]:', err.message);
     return res.status(500).json({ error: 'Failed to save asset.' });
+  } finally {
+    if (uploadedTmpPath && fs.existsSync(uploadedTmpPath)) {
+      try { fs.unlinkSync(uploadedTmpPath); } catch (_) {}
+    }
   }
 });
 
@@ -309,6 +320,7 @@ router.post('/novels/upload-asset', upload.single('file'), async (req, res) => {
  */
 router.post('/novels', optionalAuth, async (req, res) => {
   try {
+    const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
     const {
       title,
       synopsis = '',
@@ -318,23 +330,32 @@ router.post('/novels', optionalAuth, async (req, res) => {
       cover_object = null,
       chapters: rawChapters = [],
       characters: rawCharacters = [],
-    } = req.body;
+    } = body;
 
-    if (!title || typeof title !== 'string' || title.trim().length === 0) {
-      return res.status(400).json({ error: 'Title is required.' });
+    if (!title || typeof title !== 'string' || title.trim().length === 0 || title.trim().length > 255) {
+      return res.status(400).json({ error: 'Title is required and must be at most 255 characters.' });
+    }
+    if (cover_object !== null && cover_object !== undefined && (typeof cover_object !== 'string' || cover_object.length > 255)) {
+      return res.status(400).json({ error: 'cover_object must be a string of at most 255 characters.' });
+    }
+    if (global_tone !== null && global_tone !== undefined && (typeof global_tone !== 'string' || global_tone.length > 100)) {
+      return res.status(400).json({ error: 'global_tone must be a string of at most 100 characters.' });
+    }
+    if (synopsis !== null && synopsis !== undefined && typeof synopsis !== 'string') {
+      return res.status(400).json({ error: 'synopsis must be a string.' });
     }
 
     // Prevent IDOR: an authenticated user (unless admin) can only create novels for their own id
     const added_by = (req.user && req.user.role !== 'admin')
       ? req.user.id
       : (requestedAddedBy || req.user?.id);
-    if (!added_by || !UUID_REGEX.test(added_by)) {
+    if (!added_by || typeof added_by !== 'string' || !UUID_REGEX.test(added_by)) {
       return res.status(400).json({
         error: 'A valid added_by user UUID is required (or provide an authenticated session).',
       });
     }
 
-    const normalizedChannel = channel ? channel.toLowerCase().trim() : 'verified';
+    const normalizedChannel = typeof channel === 'string' && channel.trim() ? channel.toLowerCase().trim() : 'verified';
     if (!ALLOWED_CHANNELS.includes(normalizedChannel)) {
       return res.status(400).json({
         error: `Invalid channel. Allowed values: ${ALLOWED_CHANNELS.join(', ')}.`,
@@ -488,11 +509,21 @@ router.post('/novels', optionalAuth, async (req, res) => {
 
         for (let idx = 0; idx < chaptersToIngest.length; idx++) {
           const ch = chaptersToIngest[idx];
-          const chNum = parseInt(ch.chapter_number, 10) || (idx + 1);
-          const chTitle = ch.title && typeof ch.title === 'string' && ch.title.trim()
+          if (!ch || typeof ch !== 'object') {
+            throw { status: 400, message: `Invalid chapter entry at index ${idx}.` };
+          }
+          const parsedChNum = parseInt(ch.chapter_number, 10);
+          const chNum = Number.isInteger(parsedChNum) && parsedChNum >= 1 ? parsedChNum : (idx + 1);
+          const chTitle = (ch.title && typeof ch.title === 'string' && ch.title.trim()
             ? ch.title.trim()
-            : `Chapter ${chNum}`;
-          const rawText = ch.raw_text || ch.text || ch.content || '';
+            : `Chapter ${chNum}`).slice(0, 255);
+          const rawText = typeof ch.raw_text === 'string'
+            ? ch.raw_text
+            : typeof ch.text === 'string'
+              ? ch.text
+              : typeof ch.content === 'string'
+                ? ch.content
+                : '';
 
           // Parse chapter text into attributed segments (or preserve pre-attributed/pre-segmented ch.segments)
           const preAttributedSegments =
@@ -850,30 +881,43 @@ router.patch('/novels/:id', authenticateUser, async (req, res) => {
       return res.status(403).json({ error: 'Forbidden: you do not have permission to modify this novel.' });
     }
 
-    const { cover_object, title, synopsis, global_tone, channel } = req.body || {};
+    const { cover_object, title, synopsis, global_tone, channel } =
+      req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
 
     const fields = [];
     const values = [];
     let idx = 1;
 
     if (cover_object !== undefined) {
+      if (cover_object !== null && (typeof cover_object !== 'string' || cover_object.length > 255)) {
+        return res.status(400).json({ error: 'cover_object must be a string of at most 255 characters or null.' });
+      }
       fields.push(`cover_object = $${idx++}`);
       values.push(cover_object);
     }
-    if (title !== undefined && typeof title === 'string' && title.trim()) {
+    if (title !== undefined) {
+      if (typeof title !== 'string' || !title.trim() || title.trim().length > 255) {
+        return res.status(400).json({ error: 'title must be a non-empty string of at most 255 characters.' });
+      }
       fields.push(`title = $${idx++}`);
       values.push(title.trim());
     }
     if (synopsis !== undefined) {
+      if (synopsis !== null && typeof synopsis !== 'string') {
+        return res.status(400).json({ error: 'synopsis must be a string or null.' });
+      }
       fields.push(`synopsis = $${idx++}`);
       values.push(synopsis);
     }
     if (global_tone !== undefined) {
+      if (global_tone !== null && (typeof global_tone !== 'string' || global_tone.length > 100)) {
+        return res.status(400).json({ error: 'global_tone must be a string of at most 100 characters or null.' });
+      }
       fields.push(`global_tone = $${idx++}`);
       values.push(global_tone);
     }
     if (channel !== undefined) {
-      const normalizedChannel = channel ? channel.toLowerCase().trim() : 'verified';
+      const normalizedChannel = typeof channel === 'string' && channel.trim() ? channel.toLowerCase().trim() : '';
       if (!ALLOWED_CHANNELS.includes(normalizedChannel)) {
         return res.status(400).json({
           error: `Invalid channel. Allowed values: ${ALLOWED_CHANNELS.join(', ')}.`,
