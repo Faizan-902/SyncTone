@@ -26,11 +26,18 @@ const REQUIRED_VOICES = [
   { id: 'en-GB-RyanNeural', label: 'Ryan Neural (British Narrator)', gender: 'male', age_band: 'adult', language: 'en-gb', reserved_narrator: true },
   { id: 'en-GB-ThomasNeural', label: 'Thomas Neural (Harry Potter)', gender: 'male', age_band: 'young', language: 'en-gb', reserved_narrator: false },
   { id: 'en-GB-LibbyNeural', label: 'Libby Neural (Hermione Granger)', gender: 'female', age_band: 'young', language: 'en-gb', reserved_narrator: false },
-  { id: 'en-GB-AlfieNeural', label: 'Alfie Neural (Ron Weasley)', gender: 'male', age_band: 'young', language: 'en-gb', reserved_narrator: false },
-  { id: 'en-GB-ArthurNeural', label: 'Arthur Neural (Albus Dumbledore)', gender: 'male', age_band: 'elder', language: 'en-gb', reserved_narrator: false },
-  { id: 'en-GB-NoahNeural', label: 'Noah Neural (Severus Snape)', gender: 'male', age_band: 'adult', language: 'en-gb', reserved_narrator: false },
+  { id: 'en-NZ-MitchellNeural', label: 'Mitchell Neural (Ron Weasley)', gender: 'male', age_band: 'young', language: 'en-nz', reserved_narrator: false },
+  { id: 'en-IE-ConnorNeural', label: 'Connor Neural (Albus Dumbledore)', gender: 'male', age_band: 'elder', language: 'en-ie', reserved_narrator: false },
+  { id: 'en-US-RogerNeural', label: 'Roger Neural (Severus Snape)', gender: 'male', age_band: 'adult', language: 'en-us', reserved_narrator: false },
   { id: 'en-GB-SoniaNeural', label: 'Sonia Neural (Prof. McGonagall)', gender: 'female', age_band: 'adult', language: 'en-gb', reserved_narrator: false },
-  { id: 'en-GB-OliverNeural', label: 'Oliver Neural (Draco Malfoy)', gender: 'male', age_band: 'young', language: 'en-gb', reserved_narrator: false },
+  { id: 'en-AU-WilliamMultilingualNeural', label: 'William Neural (Draco Malfoy)', gender: 'male', age_band: 'young', language: 'en-au', reserved_narrator: false },
+  { id: 'en-CA-LiamNeural', label: 'Liam Neural (Commonwealth Male)', gender: 'male', age_band: 'adult', language: 'en-ca', reserved_narrator: false },
+  { id: 'en-GB-MaisieNeural', label: 'Maisie Neural (British Young Female)', gender: 'female', age_band: 'young', language: 'en-gb', reserved_narrator: false },
+  { id: 'en-US-SteffanNeural', label: 'Steffan Neural (Deep Gruff Male)', gender: 'male', age_band: 'adult', language: 'en-us', reserved_narrator: false },
+  { id: 'en-GB-AlfieNeural', label: 'Alfie Neural (Legacy Alias)', gender: 'male', age_band: 'young', language: 'en-gb', reserved_narrator: false },
+  { id: 'en-GB-ArthurNeural', label: 'Arthur Neural (Legacy Alias)', gender: 'male', age_band: 'elder', language: 'en-gb', reserved_narrator: false },
+  { id: 'en-GB-NoahNeural', label: 'Noah Neural (Legacy Alias)', gender: 'male', age_band: 'adult', language: 'en-gb', reserved_narrator: false },
+  { id: 'en-GB-OliverNeural', label: 'Oliver Neural (Legacy Alias)', gender: 'male', age_band: 'young', language: 'en-gb', reserved_narrator: false },
   { id: 'bm_george', label: 'George (British Received)', gender: 'male', age_band: 'adult', language: 'en-gb', reserved_narrator: false },
   { id: 'bm_daniel', label: 'Daniel (British Expressive)', gender: 'male', age_band: 'young', language: 'en-gb', reserved_narrator: false },
   { id: 'bf_emma', label: 'Emma (British Refined)', gender: 'female', age_band: 'young', language: 'en-gb', reserved_narrator: false },
@@ -440,7 +447,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'Ron Weasley',
-      voiceId: 'en-GB-AlfieNeural',
+      voiceId: 'en-NZ-MitchellNeural',
       gender: 'male',
       ageBand: 'young',
       temperament: 'Loyal, Humorous, Reluctant',
@@ -470,7 +477,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'Albus Dumbledore',
-      voiceId: 'en-GB-ArthurNeural',
+      voiceId: 'en-IE-ConnorNeural',
       gender: 'male',
       ageBand: 'elder',
       temperament: 'Benevolent, Serene, Enigmatic',
@@ -490,7 +497,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'Severus Snape',
-      voiceId: 'en-GB-NoahNeural',
+      voiceId: 'en-US-RogerNeural',
       gender: 'male',
       ageBand: 'adult',
       temperament: 'Austere, Sardonic, Disdainful',
@@ -500,7 +507,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'Draco Malfoy',
-      voiceId: 'en-GB-OliverNeural',
+      voiceId: 'en-AU-WilliamMultilingualNeural',
       gender: 'male',
       ageBand: 'young',
       temperament: 'Arrogant, Sneering, Aristocratic',
@@ -510,7 +517,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'Vernon Dursley',
-      voiceId: 'en-GB-ArthurNeural',
+      voiceId: 'en-IE-ConnorNeural',
       gender: 'male',
       ageBand: 'adult',
       temperament: 'Pompous, Choleric, Conventional',
@@ -530,7 +537,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'Dudley Dursley',
-      voiceId: 'en-GB-AlfieNeural',
+      voiceId: 'en-NZ-MitchellNeural',
       gender: 'male',
       ageBand: 'young',
       temperament: 'Spoiled, Demanding, Petulant',
@@ -540,7 +547,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'Professor Quirrell',
-      voiceId: 'en-GB-NoahNeural',
+      voiceId: 'en-US-RogerNeural',
       gender: 'male',
       ageBand: 'adult',
       temperament: 'Stuttering, Nervous, Deceptive',
@@ -550,7 +557,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'Neville Longbottom',
-      voiceId: 'en-GB-AlfieNeural',
+      voiceId: 'en-NZ-MitchellNeural',
       gender: 'male',
       ageBand: 'young',
       temperament: 'Timid, Well-meaning, Clumsy',
@@ -580,7 +587,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'Fred Weasley',
-      voiceId: 'en-GB-AlfieNeural',
+      voiceId: 'en-NZ-MitchellNeural',
       gender: 'male',
       ageBand: 'young',
       temperament: 'Mischievous, Witty, High-spirited',
@@ -590,7 +597,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'George Weasley',
-      voiceId: 'en-GB-AlfieNeural',
+      voiceId: 'en-NZ-MitchellNeural',
       gender: 'male',
       ageBand: 'young',
       temperament: 'Mischievous, Quick-witted, Playful',
@@ -620,7 +627,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'Garrick Ollivander',
-      voiceId: 'en-GB-ArthurNeural',
+      voiceId: 'en-IE-ConnorNeural',
       gender: 'male',
       ageBand: 'elder',
       temperament: 'Eerie, Reverent, Perceptive',
@@ -630,7 +637,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'Lord Voldemort',
-      voiceId: 'en-GB-NoahNeural',
+      voiceId: 'en-US-RogerNeural',
       gender: 'male',
       ageBand: 'adult',
       temperament: 'Cold, Sinister, Whispering',
@@ -640,7 +647,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'Argus Filch',
-      voiceId: 'en-GB-ArthurNeural',
+      voiceId: 'en-IE-ConnorNeural',
       gender: 'male',
       ageBand: 'elder',
       temperament: 'Bitter, Sneering, Vindictive',
@@ -670,7 +677,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'Professor Flitwick',
-      voiceId: 'en-GB-ArthurNeural',
+      voiceId: 'en-IE-ConnorNeural',
       gender: 'male',
       ageBand: 'elder',
       temperament: 'Excitable, Cheerful, Scholarly',
@@ -680,7 +687,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'Seamus Finnigan',
-      voiceId: 'en-GB-AlfieNeural',
+      voiceId: 'en-NZ-MitchellNeural',
       gender: 'male',
       ageBand: 'young',
       temperament: 'Good-natured, Energetic, Fiery',
@@ -700,7 +707,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'Lee Jordan',
-      voiceId: 'en-GB-AlfieNeural',
+      voiceId: 'en-NZ-MitchellNeural',
       gender: 'male',
       ageBand: 'young',
       temperament: 'Animated, Partisan, Enthusiastic',
@@ -710,7 +717,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'Firenze',
-      voiceId: 'en-GB-ArthurNeural',
+      voiceId: 'en-IE-ConnorNeural',
       gender: 'male',
       ageBand: 'adult',
       temperament: 'Mystical, Grave, Serene',
@@ -720,7 +727,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'Bane',
-      voiceId: 'en-GB-NoahNeural',
+      voiceId: 'en-US-RogerNeural',
       gender: 'male',
       ageBand: 'adult',
       temperament: 'Stern, Traditionalist, Fierce',
@@ -730,7 +737,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     },
     {
       name: 'Ronan',
-      voiceId: 'en-GB-ArthurNeural',
+      voiceId: 'en-IE-ConnorNeural',
       gender: 'male',
       ageBand: 'adult',
       temperament: 'Melancholic, Pensive, Sober',
@@ -1087,6 +1094,7 @@ async function seedDemos({ closeConnections = false } = {}) {
     "SELECT id FROM novels WHERE title = $1 LIMIT 1",
     ["The Adventures of Sherlock Holmes"]
   );
+  const shCoverObject = '/static/covers/adventures-of-sherlock-holmes-cover.webp';
 
   if (shNovelCheck.rows.length > 0) {
     shNovelId = shNovelCheck.rows[0].id;
@@ -1098,12 +1106,14 @@ async function seedDemos({ closeConnections = false } = {}) {
         status = 'published',
         global_tone = 'Victorian Mystery',
         portfolio_source = 'manual',
-        added_by = $2,
+        cover_object = $2,
+        added_by = $3,
         updated_at = now()
-      WHERE id = $3;
+      WHERE id = $4;
     `,
       [
         "A collection of classic detective mysteries in Victorian London featuring Sherlock Holmes and Dr. John Watson.",
+        shCoverObject,
         authorId,
         shNovelId,
       ]
@@ -1111,19 +1121,20 @@ async function seedDemos({ closeConnections = false } = {}) {
   } else {
     const shNovelInsert = await pool.query(
       `
-      INSERT INTO novels (title, synopsis, channel, status, global_tone, portfolio_source, added_by)
-      VALUES ($1, $2, 'verified', 'published', 'Victorian Mystery', 'manual', $3)
+      INSERT INTO novels (title, synopsis, channel, status, global_tone, portfolio_source, cover_object, added_by)
+      VALUES ($1, $2, 'verified', 'published', 'Victorian Mystery', 'manual', $3, $4)
       RETURNING id;
     `,
       [
         "The Adventures of Sherlock Holmes",
         "A collection of classic detective mysteries in Victorian London featuring Sherlock Holmes and Dr. John Watson.",
+        shCoverObject,
         authorId,
       ]
     );
     shNovelId = shNovelInsert.rows[0].id;
   }
-  console.log(`  ✔ Novel ID: ${shNovelId}`);
+  console.log(`  ✔ Novel ID: ${shNovelId} (cover_object: ${shCoverObject})`);
 
   // Cast
   const shCast = [
@@ -1497,10 +1508,12 @@ module.exports = {
   seedDemos,
   REQUIRED_VOICES,
   ensureVoiceCatalog,
+  ensureChapterAudio,
 };
 module.exports.seedDemos = seedDemos;
 module.exports.REQUIRED_VOICES = REQUIRED_VOICES;
 module.exports.ensureVoiceCatalog = ensureVoiceCatalog;
+module.exports.ensureChapterAudio = ensureChapterAudio;
 module.exports.default = seedDemos;
 
 if (require.main === module) {

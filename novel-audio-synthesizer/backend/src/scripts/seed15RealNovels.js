@@ -6,9 +6,9 @@
 
 const { Pool } = require('pg');
 const mongoose = require('mongoose');
-const path = require('path');
 const { config } = require('../config');
 const ChapterModel = require('../models/Chapter');
+const { ensureVoiceCatalog, ensureChapterAudio } = require('./seedDemos');
 
 const AUTHORS = [
   { name: 'J.K. Rowling', email: 'jk_rowling@synctone.internal' },
@@ -324,14 +324,24 @@ const NOVELS = [
   }
 ];
 
-async function seed() {
+const DIALOGUE_VOICES = [
+  'en-GB-ThomasNeural',
+  'en-GB-LibbyNeural',
+  'en-NZ-MitchellNeural',
+  'en-GB-SoniaNeural',
+  'bm_daniel',
+  'bf_emma',
+  'am_puck',
+  'bf_isabella',
+];
+
+async function seed({ closeConnections = true } = {}) {
   console.log('=== Seeding 15 Real Literary Works into SyncTone Catalog ===');
   const pool = new Pool({
     connectionString: config.databaseUrl,
     ...(config.pgSsl ? { ssl: { rejectUnauthorized: Boolean(config.pgSslRejectUnauthorized) } } : {}),
   });
   await mongoose.connect(config.mongoUri);
-  const { ensureVoiceCatalog } = require('./seedDemos');
   await ensureVoiceCatalog(pool);
   console.log('✓ Connected to PostgreSQL and MongoDB');
 
@@ -354,6 +364,18 @@ async function seed() {
     const item = NOVELS[i];
     const authorId = authorMap[item.author];
 
+    // Remove any duplicate/legacy-UUID entries with the same title before upserting canonical ID
+    const dupNovels = await pool.query(
+      `SELECT id FROM novels WHERE LOWER(title) = LOWER($1) AND id <> $2`,
+      [item.title, item.id]
+    );
+    if (dupNovels.rows.length > 0) {
+      const dupIds = dupNovels.rows.map((r) => r.id);
+      await ChapterModel.deleteMany({ novel_id: { $in: dupIds } });
+      await pool.query(`DELETE FROM novels WHERE id = ANY($1::uuid[])`, [dupIds]);
+      console.log(`  ↺ Removed ${dupIds.length} duplicate entry/entries for "${item.title}"`);
+    }
+
     // Upsert novel in PostgreSQL
     await pool.query(
       `INSERT INTO novels (id, added_by, title, synopsis, channel, status, global_tone, portfolio_source, cover_object)
@@ -370,14 +392,77 @@ async function seed() {
     );
 
     // Upsert Narrator Character
-    await pool.query(
+    const narrRes = await pool.query(
       `INSERT INTO characters (novel_id, canonical_name, gender, age_band, temperament, sample_quote, voice_id, is_narrator, source)
        VALUES ($1, $2, 'unknown', 'adult', 'calm and authoritative', 'Recorded for SyncTone Audio Classics.', $3, true, 'manual')
        ON CONFLICT (novel_id) WHERE is_narrator = true DO UPDATE SET
          canonical_name = EXCLUDED.canonical_name,
-         voice_id = EXCLUDED.voice_id`,
+         voice_id = EXCLUDED.voice_id
+       RETURNING id`,
       [item.id, item.narrator_name, item.narrator_voice]
     );
+    const narratorCharId = narrRes.rows[0].id;
+
+    // Assign distinct active voices to dialogue speakers and upsert them into PG characters
+    const speakerVoiceMap = new Map();
+    const speakerCharIdMap = new Map();
+    const candidateVoices = DIALOGUE_VOICES.filter((v) => v !== item.narrator_voice);
+    let voiceIdx = 0;
+
+    for (const t of item.chapter_text) {
+      const isNarratorSpeaker =
+        t.type === 'narration' || t.speaker === item.narrator_name || t.speaker === 'Narrator';
+      if (isNarratorSpeaker) {
+        speakerVoiceMap.set(t.speaker, item.narrator_voice);
+        speakerCharIdMap.set(t.speaker, narratorCharId);
+        continue;
+      }
+      if (!speakerVoiceMap.has(t.speaker)) {
+        const assignedVoice = candidateVoices[voiceIdx % candidateVoices.length];
+        voiceIdx++;
+        speakerVoiceMap.set(t.speaker, assignedVoice);
+        const charRes = await pool.query(
+          `INSERT INTO characters (novel_id, canonical_name, gender, age_band, temperament, sample_quote, voice_id, is_narrator, source)
+           VALUES ($1, $2, 'unknown', 'adult', 'expressive literary character', $3, $4, false, 'manual')
+           ON CONFLICT (novel_id, canonical_name) DO UPDATE SET
+             voice_id = EXCLUDED.voice_id,
+             sample_quote = COALESCE(characters.sample_quote, EXCLUDED.sample_quote)
+           RETURNING id`,
+          [item.id, t.speaker, t.text, assignedVoice]
+        );
+        speakerCharIdMap.set(t.speaker, charRes.rows[0].id);
+      }
+    }
+
+    // Build initial segment timings
+    let currentMs = 0;
+    const rawSegments = item.chapter_text.map((t, idx) => {
+      const dur = Math.max(4000, t.text.length * 65);
+      const isNarratorSpeaker =
+        t.type === 'narration' || t.speaker === item.narrator_name || t.speaker === 'Narrator';
+      const voiceId = speakerVoiceMap.get(t.speaker) || item.narrator_voice;
+      const charId = isNarratorSpeaker
+        ? 'narrator'
+        : (speakerCharIdMap.get(t.speaker) || t.speaker.toLowerCase().replace(/[^a-z0-9]/g, '_'));
+      const seg = {
+        order: idx + 1,
+        segment_id: idx + 1,
+        type: t.type,
+        text: t.text,
+        speaker_name: t.speaker,
+        speaker_id: charId,
+        character_id: charId,
+        voice_id: voiceId,
+        assigned_voice_id: voiceId,
+        start_ms: currentMs,
+        end_ms: currentMs + dur,
+        confidence: 1.0,
+        source: isNarratorSpeaker ? 'narrator_default' : 'manual',
+        needs_review: false,
+      };
+      currentMs += dur + 500;
+      return seg;
+    });
 
     // Upsert Chapter 1 in PostgreSQL
     const chRes = await pool.query(
@@ -388,46 +473,40 @@ async function seed() {
          status = 'completed',
          total_duration_ms = EXCLUDED.total_duration_ms
        RETURNING id`,
-      [item.id, item.chapter_title, item.chapter_text.length * 6000]
+      [item.id, item.chapter_title, currentMs]
     );
     const pgChapterId = chRes.rows[0].id;
 
-    // Build timeline and segments for MongoDB
-    let currentMs = 0;
-    const segments = item.chapter_text.map((t, idx) => {
-      const dur = Math.max(4000, t.text.length * 65);
-      const seg = {
-        order: idx + 1,
-        segment_id: idx + 1,
-        type: t.type,
-        text: t.text,
-        speaker_name: t.speaker,
-        character_id: t.speaker === item.narrator_name ? 'narrator' : t.speaker.toLowerCase().replace(/[^a-z0-9]/g, '_'),
-        voice_id: item.narrator_voice,
-        start_ms: currentMs,
-        end_ms: currentMs + dur,
-      };
-      currentMs += dur + 500;
-      return seg;
-    });
+    // Ensure valid playback audio file and consistent manifest timeline
+    const stitched = await ensureChapterAudio(pgChapterId, rawSegments, { maxSynthesizeCount: 0 });
+    const totalDuration = stitched?.total_duration_ms || currentMs;
+    const audioFormat = stitched?.audio_format || 'mp3';
+    const swiftAudioObject = `${pgChapterId}.${audioFormat}`;
+
+    await pool.query(
+      `UPDATE chapters SET total_duration_ms = $1, swift_audio_object = $2, updated_at = now() WHERE id = $3`,
+      [totalDuration, swiftAudioObject, pgChapterId]
+    );
 
     const manifest = {
       novel_id: item.id,
       chapter_id: pgChapterId,
       audio_url: `/api/stream/${pgChapterId}`,
       audio_stream_url: `/api/stream/${pgChapterId}`,
-      total_duration_ms: currentMs,
-      timeline: segments.map((s) => ({
-        segment_id: s.segment_id,
-        order: s.order,
-        start_ms: s.start_ms,
-        end_ms: s.end_ms,
-        speaker_name: s.speaker_name,
-        character_id: s.character_id,
-        voice_id: s.voice_id,
-        text: s.text,
-        type: s.type,
-      })),
+      total_duration_ms: totalDuration,
+      timeline: (stitched?.timeline && stitched.timeline.length > 0)
+        ? stitched.timeline
+        : rawSegments.map((s) => ({
+            segment_id: s.segment_id,
+            order: s.order,
+            start_ms: s.start_ms,
+            end_ms: s.end_ms,
+            speaker_name: s.speaker_name,
+            character_id: s.character_id,
+            voice_id: s.voice_id,
+            text: s.text,
+            type: s.type,
+          })),
     };
 
     // Upsert MongoDB Chapter Document
@@ -439,23 +518,41 @@ async function seed() {
         chapter_number: 1,
         title: item.chapter_title,
         status: 'completed',
-        total_duration_ms: currentMs,
+        total_duration_ms: totalDuration,
         raw_text: item.chapter_text.map((t) => `${t.speaker}: ${t.text}`).join('\n\n'),
-        segments,
+        segments: rawSegments,
         manifest,
       },
       { upsert: true, new: true }
     );
 
-    console.log(`✓ [${String(i + 1).padStart(2, '0')}/15] "${item.title}" seeded with ${segments.length} prose segments.`);
+    console.log(`✓ [${String(i + 1).padStart(2, '0')}/15] "${item.title}" seeded with ${rawSegments.length} prose segments.`);
+  }
+
+  // 3. Purge any orphaned MongoDB chapter documents whose pg_chapter_id does not exist in PG
+  const validPgChaps = await pool.query('SELECT id FROM chapters');
+  const validIds = validPgChaps.rows.map((r) => r.id);
+  const orphanRes = await ChapterModel.deleteMany({ pg_chapter_id: { $nin: validIds } });
+  if (orphanRes.deletedCount > 0) {
+    console.log(`✓ Purged ${orphanRes.deletedCount} orphaned MongoDB chapter document(s).`);
   }
 
   await pool.end();
-  await mongoose.disconnect();
+  if (closeConnections) {
+    await mongoose.disconnect();
+  }
   console.log('=== Seeding Complete: 15 Real Literary Works Ready in Catalog ===');
 }
 
-seed().catch((err) => {
-  console.error('Seeding failed:', err);
-  process.exit(1);
-});
+module.exports = {
+  NOVELS,
+  AUTHORS,
+  seed,
+};
+
+if (require.main === module) {
+  seed({ closeConnections: true }).catch((err) => {
+    console.error('Seeding failed:', err);
+    process.exit(1);
+  });
+}
